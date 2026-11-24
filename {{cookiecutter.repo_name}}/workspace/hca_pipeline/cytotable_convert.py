@@ -36,6 +36,7 @@ more image columns: plate, well and site, ``Image_ImageQuality_*`` (blur and sat
 under the same rule as the presets: its cytoplasm object must have a parent cell, a parent nucleus
 and an image.
 """
+
 from __future__ import annotations
 
 import os
@@ -43,15 +44,20 @@ import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import cytotable
 import pandas as pd
+import parsl
 import pyarrow.parquet as pq
+from parsl.config import Config
+from parsl.errors import NoDataFlowKernelError
+from parsl.executors.threads import ThreadPoolExecutor
 
 # CytoTable finds a CSV table by its file name without the extension, in any case.
 CSV_TABLES = ("image", "cells", "cytoplasm", "nuclei")
 
 # Setting modified join queres for CytoTable. The preset joins keep only the image
-# file names from the Image table (the SQLite preset also keeps well and plate). 
-# Data QC needs more image columns: plate, well and site, "Image_ImageQuality_*" 
+# file names from the Image table (the SQLite preset also keeps well and plate).
+# Data QC needs more image columns: plate, well and site, "Image_ImageQuality_*"
 # (blur and saturation) and "Image_PathName_*". (requirded for qc notebook)
 
 # Join for ExportToDatabase (SQLite). Column names already start with the table name
@@ -174,24 +180,31 @@ def convert_to_parquet(
     >>> convert_to_parquet(Path("workspace/backend/EXP"), Path("workspace/analysis/EXP/outputs/parquet"))
     [PosixPath('workspace/analysis/EXP/outputs/parquet/PlateA.parquet')]
     """
-    import cytotable
-    from parsl.config import Config
-    from parsl.executors.threads import ThreadPoolExecutor
 
+    # setting paths
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
+
+    # iterating over the runs in the source folder
     outputs = []
     for name, source, kind in _find_runs(Path(source_dir)):
         final = dest_dir / f"{name}.parquet"
         outputs.append(final)
         if final.exists() and not overwrite:
-            progress(f"kept       {final.name} (exists; turn on overwrite to convert again)")
+            progress(
+                f"kept       {final.name} (exists; turn on overwrite to convert again)"
+            )
             continue
 
+        # set up the temporary folder and the progress message
         progress(f"converting {source.name} ({kind}) -> {final.name}")
-        work = dest_dir / f".cytotable_work_{name}"  # temporary: CytoTable chunks and parsl logs
+        work = (
+            dest_dir / f".cytotable_work_{name}"
+        )  # temporary: CytoTable chunks and parsl logs
         shutil.rmtree(work, ignore_errors=True)
         _reset_parsl()
+
+        # run conversion
         try:
             result = cytotable.convert(
                 source_path=str(source),
@@ -204,19 +217,32 @@ def convert_to_parquet(
                 # Threads instead of separate processes, so it also works on Windows. Parsl (the task
                 # runner CytoTable uses) writes its logs to the temporary folder, not to ./runinfo.
                 parsl_config=Config(
-                    executors=[ThreadPoolExecutor(max_threads=max_threads, label="cytotable")],
+                    executors=[
+                        ThreadPoolExecutor(max_threads=max_threads, label="cytotable")
+                    ],
                     run_dir=str(work / "parsl_run"),
                 ),
             )
+            # With a join, CytoTable returns the path of the one Parquet file it wrote (a Path, although
+            # its type hint says str; other settings return a list or a dict). The file is in the
+            # temporary folder; move it to its final place.
+            if not isinstance(result, (str, os.PathLike)):
+                raise TypeError(f"CytoTable returned {type(result).__name__}, expected the path of one Parquet file.")
             os.replace(result, final)
         finally:
-            _reset_parsl()  # stop parsl before deleting the folder it writes to
+            # stop parsl before deleting the folder it writes to,
+            # then delete the temporary folder. It is not needed after the conversion.
+            _reset_parsl()
             shutil.rmtree(work, ignore_errors=True)
-        progress(f"wrote      {final.name}: {pq.ParquetFile(final).metadata.num_rows:,} cells")
+        progress(
+            f"wrote      {final.name}: {pq.ParquetFile(final).metadata.num_rows:,} cells"
+        )
     return outputs
 
 
-def read_qc_columns(paths: Sequence[Path], prefixes: Sequence[str], exact: Sequence[str] = ()) -> pd.DataFrame:
+def read_qc_columns(
+    paths: Sequence[Path], prefixes: Sequence[str], exact: Sequence[str] = ()
+) -> pd.DataFrame:
     """Read selected columns from one or more Parquet files into one table.
 
     Parquet stores each column separately, so reading 200 of 3,000 columns reads only those 200.
@@ -237,12 +263,23 @@ def read_qc_columns(paths: Sequence[Path], prefixes: Sequence[str], exact: Seque
         example a Hoechst channel that only plate B has), its values are NaN for that file's rows.
         The table is empty if ``paths`` is empty.
     """
+    # setting the columns to read: every column that starts with one of the prefixes, plus the exact names
     starts, names = tuple(prefixes), set(exact)
     frames = []
+
+    # iterate over the paths, read the schema of each file, then read only the wanted columns.
+    # The schema is small and fast to read.
     for path in map(Path, paths):
-        wanted = [c for c in pq.read_schema(path).names if c.startswith(starts) or c in names]
+        wanted = [
+            c for c in pq.read_schema(path).names if c.startswith(starts) or c in names
+        ]
         frames.append(pq.read_table(path, columns=wanted).to_pandas())
-    return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+    # return the concatenation of all frames, or an empty frame if there are no frames.
+    # The concatenation keeps all columns, even if some frames do not have them. Missing values are NaN.
+    return (
+        pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+    )
 
 
 # --------------------------------------------------------------------------- helpers
@@ -285,14 +322,20 @@ def _find_runs(source_dir: Path) -> list[tuple[str, Path, str]]:
             f"CytoTable reads SQLite files only with the .sqlite extension. Rename the .db files in {source_dir}."
         )
 
-    folders = sorted({p.parent for p in source_dir.rglob("*.csv") if p.stem.lower() == "image"})
+    folders = sorted(
+        {p.parent for p in source_dir.rglob("*.csv") if p.stem.lower() == "image"}
+    )
     for folder in folders:
         found = {p.stem.lower() for p in folder.glob("*.csv")}
         missing = [f"{t.capitalize()}.csv" for t in CSV_TABLES if t not in found]
         if missing:
-            raise ValueError(f"{folder} has Image.csv but no {', '.join(missing)} (CellProfiler ExportToSpreadsheet).")
+            raise ValueError(
+                f"{folder} has Image.csv but no {', '.join(missing)} (CellProfiler ExportToSpreadsheet)."
+            )
         if any(other != folder and folder in other.parents for other in folders):
-            raise ValueError(f"{folder} holds a CellProfiler run and another run in a subfolder. Give each run its own folder.")
+            raise ValueError(
+                f"{folder} holds a CellProfiler run and another run in a subfolder. Give each run its own folder."
+            )
     return [(name(f), f, "csv") for f in folders]
 
 
@@ -311,9 +354,18 @@ def _csv_join(folder: Path) -> str:
         only if Image.csv has them, because DuckDB stops with an error when the rename finds no
         column (for example, in a pipeline without the MeasureImageQuality module).
     """
+    # set the image query in the join. If Image.csv has ImageQuality_* columns, rename them to Image_ImageQuality_*.
     image_csv = next(p for p in folder.glob("*.csv") if p.stem.lower() == "image")
-    has_quality = any(c.startswith("ImageQuality_") for c in pd.read_csv(image_csv, nrows=0).columns)
-    return CSV_JOIN.format(image_columns=CSV_IMAGE_COLUMNS + (CSV_IMAGE_QUALITY if has_quality else ""))
+
+    # check if Image.csv has any ImageQuality_* columns. DuckDB stops with an error when the rename finds no column.
+    has_quality = any(
+        c.startswith("ImageQuality_") for c in pd.read_csv(image_csv, nrows=0).columns
+    )
+
+    # return the join query with the image query filled in. The query renames ImageQuality_* columns only if Image.csv has them.
+    return CSV_JOIN.format(
+        image_columns=CSV_IMAGE_COLUMNS + (CSV_IMAGE_QUALITY if has_quality else "")
+    )
 
 
 def _reset_parsl() -> None:
@@ -323,10 +375,10 @@ def _reset_parsl() -> None:
     open, and the next conversion in the same notebook session stops with an error. This function
     closes that session. It does nothing if no session is open.
     """
-    import parsl
-
-    for step in (lambda: parsl.dfk().cleanup(), parsl.clear):
-        try:
-            step()
-        except Exception:  # no session is open: nothing to close
-            pass
+    try:
+        session = parsl.dfk()
+    except NoDataFlowKernelError:
+        return  # no session is open: nothing to close
+    if not session.cleanup_called:  # cleanup() raises if it already ran
+        session.cleanup()
+    parsl.clear()
