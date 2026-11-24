@@ -202,6 +202,8 @@ def convert_to_parquet(
             dest_dir / f".cytotable_work_{name}"
         )  # temporary: CytoTable chunks and parsl logs
         shutil.rmtree(work, ignore_errors=True)
+
+        # stop any parsl session left from an earlier conversion, then delete the folder it wrote to
         _reset_parsl()
 
         # run conversion
@@ -227,7 +229,9 @@ def convert_to_parquet(
             # its type hint says str; other settings return a list or a dict). The file is in the
             # temporary folder; move it to its final place.
             if not isinstance(result, (str, os.PathLike)):
-                raise TypeError(f"CytoTable returned {type(result).__name__}, expected the path of one Parquet file.")
+                raise TypeError(
+                    f"CytoTable returned {type(result).__name__}, expected the path of one Parquet file."
+                )
             os.replace(result, final)
         finally:
             # stop parsl before deleting the folder it writes to,
@@ -308,12 +312,17 @@ def _find_runs(source_dir: Path) -> list[tuple[str, Path, str]]:
     if not source_dir.is_dir():
         return []
 
+    # set funcction to build output name from the run's path
+    # The name is the run's path below source_dir, joined with "_": PlateA/P1.sqlite gives PlateA_P1.parquet.
     def name(path: Path) -> str:
         parts = path.relative_to(source_dir).parts
         if path.is_file():
             parts = (*parts[:-1], path.stem)
         return "_".join(parts) or source_dir.name
 
+    # find the runs. If there are SQLite files, return them. If there are CSV folders, check that they
+    # have all four tables and that no folder lies inside another, then return them.
+    # If there are .db files but no .sqlite file, raise an error.
     databases = sorted(source_dir.rglob("*.sqlite"))
     if databases:
         return [(name(p), p, "sqlite") for p in databases]
@@ -322,20 +331,33 @@ def _find_runs(source_dir: Path) -> list[tuple[str, Path, str]]:
             f"CytoTable reads SQLite files only with the .sqlite extension. Rename the .db files in {source_dir}."
         )
 
+    # sort folders by their path, so a folder inside another comes after it.
+    # Check that each folder has all four tables and that no folder lies inside another.
     folders = sorted(
         {p.parent for p in source_dir.rglob("*.csv") if p.stem.lower() == "image"}
     )
+
+    # iterate each folder, check that it has all four tables and that no other folder is inside it.
     for folder in folders:
+        # set found and missing tables. The CSV preset finds tables by their file name without
+        # the extension, in any case.
         found = {p.stem.lower() for p in folder.glob("*.csv")}
         missing = [f"{t.capitalize()}.csv" for t in CSV_TABLES if t not in found]
+
+        # raise an error if a table is missing or if another run is in a subfolder.
         if missing:
             raise ValueError(
                 f"{folder} has Image.csv but no {', '.join(missing)} (CellProfiler ExportToSpreadsheet)."
             )
+
+        # raise an error if another run is in a subfolder. CytoTable reads subfolders too, 
+        # so the two runs would be mixed.
         if any(other != folder and folder in other.parents for other in folders):
             raise ValueError(
                 f"{folder} holds a CellProfiler run and another run in a subfolder. Give each run its own folder."
             )
+
+    # reeturn the list of runs
     return [(name(f), f, "csv") for f in folders]
 
 
