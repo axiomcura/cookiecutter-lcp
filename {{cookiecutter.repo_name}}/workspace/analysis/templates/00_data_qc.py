@@ -37,7 +37,7 @@ def _(mo):
     `site_qc.csv`, `excluded_sites.csv`, `cell_qc.parquet`,
     `excluded_cells.parquet`, `dna_content_peaks.csv`,
     `dna_content_per_well.csv`, `provenance_nb00_latest.json`; figures in
-    `figures/data_qc/`
+    `figures/data_qc/` (`<name>.pdf` and `.png` for papers, `<name>_explained.png` with headline)
 
     ## Three checks
 
@@ -51,6 +51,11 @@ def _(mo):
     keeps a cell only if its site passes image QC **and** the cell passes
     profile QC (the same rule as the Panc1-hPSC pilot QC).
 
+    **Figures** follow the `publication-figures` skill: each figure has a plain-language
+    headline and a how-to-read line in the notebook, one colour per meaning, one brightness
+    scale for compared images, and a note below it on what to notice and what not to
+    conclude. The exported PDF/PNG files leave the headline out; the caption carries it.
+
     ## Execution logic
 
     1. Choose the experiment and (optionally) adjust thresholds.
@@ -62,12 +67,6 @@ def _(mo):
        how often each coSMicQC condition flags G2/M cells.
     6. Compare flag rates of treatments and negative controls.
     7. Write flag tables and exclusion lists, provenance, and integrity checks.
-
-    ### References
-
-    - Tomkinson, Bunten & Way 2025 — coSMicQC [doi:10.1101/2025.10.14.682427]
-    - Panc1-hPSC pilot QC notebooks (mirandaresearchlab/Panc1-hPSC-Pilot-profiles, `notebooks/1.quality-control`) — image-QC rules, coSMicQC thresholds and DNA-content groups used here
-    - Bray et al. 2016 — Cell Painting, image-quality measurements [doi:10.1038/nprot.2016.105]
     """)
     return
 
@@ -139,6 +138,18 @@ def _(Path, mo):
         site_quality_from_cellprofiler,
         site_quality_from_pixels,
     )
+    from hca_pipeline import pubfig as pf
+    from hca_pipeline.data_qc_figures import (
+        fig_cell_crops,
+        fig_dna_content,
+        fig_feature_z,
+        fig_image_montage,
+        fig_image_qc_distributions,
+        fig_image_qc_plate_maps,
+        fig_profile_qc_rates,
+        readable,
+        shared_limits,
+    )
     from hca_pipeline.image_qc import read_image, robust_rescale_image, scan_images
     from hca_pipeline.io import (
         discover_single_cell_inputs,
@@ -153,7 +164,9 @@ def _(Path, mo):
         ensure_core_metadata,
         read_barcode_platemap,
     )
-    from hca_pipeline.plotting import save_figure_protected
+
+    # One figure style for the whole notebook (fonts, sizes, colours, export settings).
+    pf.use_style("generic")
 
     mo.callout(mo.md(f"✅ Loaded `hca_pipeline` from `{_pipelines_dir}`."), kind="success")
     return (
@@ -168,20 +181,29 @@ def _(Path, mo):
         discover_single_cell_inputs,
         dna_content_groups,
         ensure_core_metadata,
+        fig_cell_crops,
+        fig_dna_content,
+        fig_feature_z,
+        fig_image_montage,
+        fig_image_qc_distributions,
+        fig_image_qc_plate_maps,
+        fig_profile_qc_rates,
         flag_sites,
         index_images,
         label_cell_outliers,
         profile_qc_conditions,
+        pf,
         profile_qc_status,
         read_barcode_platemap,
         read_cellprofiler_csvs,
         read_cellprofiler_sqlite,
         read_image,
+        readable,
         resolve_dna_channel,
         resolve_image_path,
         robust_rescale_image,
-        save_figure_protected,
         scan_images,
+        shared_limits,
         site_quality_from_cellprofiler,
         site_quality_from_pixels,
         write_parquet_protected,
@@ -247,6 +269,10 @@ def _(loaded_config, mo):
             "under_segmented_cells": mo.ui.checkbox(value=True, label="under_segmented_cells"),
         }
     )
+    pixel_size_input = mo.ui.number(
+        start=0, stop=5, step=0.01, value=0.0,
+        label="Pixel size (µm per pixel; 0 = unknown, no scale bars)",
+    )
     n_examples_input = mo.ui.slider(start=2, stop=12, step=1, value=6, label="Examples per montage")
     mo.vstack(
         [
@@ -260,6 +286,7 @@ def _(loaded_config, mo):
                             saturation_input,
                             mo.md("**Active coSMicQC conditions** (a cell fails if it trips any active one):"),
                             condition_inputs,
+                            pixel_size_input,
                             n_examples_input,
                         ]
                     )
@@ -273,6 +300,7 @@ def _(loaded_config, mo):
         image_root_input,
         n_examples_input,
         overwrite_input,
+        pixel_size_input,
         saturation_input,
     )
 
@@ -288,6 +316,7 @@ def _(
     mo,
     n_examples_input,
     overwrite_input,
+    pixel_size_input,
     saturation_input,
 ):
     EXPERIMENT_ID = experiment_id_input.value
@@ -298,6 +327,8 @@ def _(
     ACTIVE_CONDITIONS = [name for name, on in condition_inputs.value.items() if on]
     N_EXAMPLES = int(n_examples_input.value)
     RANDOM_STATE = 0
+    PIXEL_SIZE_UM = float(pixel_size_input.value) or None
+    FIG_FORMATS = ("pdf", "png")  # vector first; the explained PNG is added by pubfig.export
     IMAGE_ROOT = (REPO_ROOT / image_root_input.value.strip()) if image_root_input.value.strip() else None
 
     WORKSPACE_DIR = REPO_ROOT / "workspace"
@@ -318,6 +349,7 @@ def _(
             |---|---|
             | Experiment | `{EXPERIMENT_ID}` |
             | CellProfiler input | `{DB_ROOT}` |
+            | Pixel size | {f'{PIXEL_SIZE_UM} µm' if PIXEL_SIZE_UM else 'unknown (no scale bars)'} |
             | Raw image folder | `{IMAGE_ROOT or 'not set (CellProfiler paths only)'}` |
             | Blur limit | robust z < {BLUR_Z_LIMIT} |
             | Saturation limit | > {SATURATION_PCT_LIMIT} % clipped pixels |
@@ -336,10 +368,12 @@ def _(
         DB_ROOT,
         EXPERIMENT_ID,
         FIGS_DIR,
+        FIG_FORMATS,
         IMAGE_ROOT,
         METADATA_DIR,
         N_EXAMPLES,
         OVERWRITE,
+        PIXEL_SIZE_UM,
         RANDOM_STATE,
         RESULTS_DIR,
         SATURATION_PCT_LIMIT,
@@ -571,61 +605,60 @@ def _(IMAGE_CHANNELS, pd, site_flags):
 def _(
     BLUR_Z_LIMIT,
     FIGS_DIR,
+    FIG_FORMATS,
     IMAGE_CHANNELS,
     OVERWRITE,
     SATURATION_PCT_LIMIT,
+    fig_image_qc_distributions,
     mo,
-    plt,
-    save_figure_protected,
+    pf,
     site_flags,
 ):
     mo.stop(not IMAGE_CHANNELS, mo.md("_No image-QC metrics to plot._"))
-    _fig, _axes = plt.subplots(2, len(IMAGE_CHANNELS), figsize=(4.5 * len(IMAGE_CHANNELS), 6.5), squeeze=False)
-    for _col, _ch in enumerate(IMAGE_CHANNELS):
-        _ax = _axes[0, _col]
-        _ax.hist(site_flags[f"blur_z_{_ch}"].dropna(), bins=60, color="0.55")
-        _ax.axvline(BLUR_Z_LIMIT, color="crimson", ls="--", label=f"limit {BLUR_Z_LIMIT}")
-        _ax.set(title=f"{_ch}: blur (robust z, per plate)", xlabel="robust z", ylabel="sites")
-        _ax.legend(frameon=False)
-        _ax = _axes[1, _col]
-        _ax.hist(site_flags[f"pct_saturated_{_ch}"].dropna(), bins=60, color="0.55")
-        _ax.axvline(SATURATION_PCT_LIMIT, color="crimson", ls="--", label=f"limit {SATURATION_PCT_LIMIT} %")
-        _ax.set(title=f"{_ch}: clipped pixels", xlabel="% of pixels at ceiling", ylabel="sites", yscale="log")
-        _ax.legend(frameon=False)
-    _fig.tight_layout()
-    save_figure_protected(_fig, FIGS_DIR / "image_qc_distributions.png", overwrite=OVERWRITE, dpi=150)
-    _fig
+    pf.export(
+        fig_image_qc_distributions, "image_qc_distributions", site_flags, IMAGE_CHANNELS,
+        BLUR_Z_LIMIT, SATURATION_PCT_LIMIT,
+        outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
+    )
     return
+
 
 
 @app.cell
-def _(CONFIG, FIGS_DIR, OVERWRITE, np, plt, save_figure_protected, site_flags):
-    def _plate_heatmaps():
-        n_rows, n_cols = (8, 12) if CONFIG.plate_format == 96 else (16, 24)
-        plates = sorted(site_flags["Metadata_Plate"].unique())
-        fig, axes = plt.subplots(1, len(plates), figsize=(5.5 * len(plates), 3.6), squeeze=False)
-        per_well = (
-            site_flags.assign(failed=site_flags["Metadata_image_qc"].eq("fail"))
-            .groupby(["Metadata_Plate", "Metadata_Well"])["failed"].sum()
-        )
-        for ax, plate in zip(axes[0], plates):
-            grid = np.full((n_rows, n_cols), np.nan)
-            for well, value in per_well.loc[plate].items():
-                row, col = ord(str(well)[0].upper()) - 65, int(str(well)[1:]) - 1
-                if 0 <= row < n_rows and 0 <= col < n_cols:
-                    grid[row, col] = value
-            image = ax.imshow(grid, cmap="Reds", vmin=0)
-            ax.set(title=f"{plate}\nfailed sites per well", xticks=range(n_cols), yticks=range(n_rows))
-            ax.set_xticklabels(range(1, n_cols + 1), fontsize=7)
-            ax.set_yticklabels([chr(65 + i) for i in range(n_rows)], fontsize=7)
-            fig.colorbar(image, ax=ax, shrink=0.8)
-        fig.tight_layout()
-        return fig
+def _(mo):
+    mo.md(r"""
+    **What to notice:** sites beyond a dashed line are the ones NB01 removes. Most sites
+    should sit in one main group, with the flagged sites clearly apart from it.
 
-    _fig = _plate_heatmaps()
-    save_figure_protected(_fig, FIGS_DIR / "image_qc_plate_maps.png", overwrite=OVERWRITE, dpi=150)
-    _fig
+    **Do not conclude:** that every flagged site is bad. The blur score is relative to the
+    other sites on the same plate, so a plate that is blurred everywhere has no outliers.
+    The montages below show what the flagged images look like.
+    """)
     return
+
+
+
+@app.cell
+def _(CONFIG, FIGS_DIR, FIG_FORMATS, OVERWRITE, fig_image_qc_plate_maps, pf, site_flags):
+    pf.export(
+        fig_image_qc_plate_maps, "image_qc_plate_maps", site_flags, CONFIG.plate_format,
+        outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
+    )
+    return
+
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    **What to notice:** failed sites bunched in a corner, along an edge or in whole rows or
+    columns point to a plate or microscope problem, not to random bad fields.
+
+    **Do not conclude:** a cause. A well with every site failed may also hold few cells.
+    This map shows where the failures are, not why.
+    """)
+    return
+
 
 
 @app.cell
@@ -633,13 +666,16 @@ def _(mo):
     mo.md(r"""
     ### Montages: flagged vs. passing sites
 
-    Each failing site is shown next to a passing site from the same plate,
-    same channel, with the same display scaling (5th–99th percentile).
-    **Red pixels are at the detector ceiling.** Check that the flagged
-    images really are blurred or clipped. If passing images look as bad,
-    the limit is too loose; if flagged images look fine, it is too strict.
+    Each failing site (top row) is shown next to a passing site from the same plate
+    (bottom row), same channel. **All panels in one montage share one brightness scale**,
+    taken from the passing sites, so brightness and sharpness can be compared by eye.
+    **Magenta pixels are at the detector ceiling.** Check that the flagged images really are
+    blurred or clipped. If the passing images look as bad, the limit is too loose; if the
+    flagged images look fine, it is too strict. Sites are picked at random; set the pixel
+    size under **Advanced settings** to get a scale bar.
     """)
     return
+
 
 
 @app.cell
@@ -656,54 +692,49 @@ def _(IMAGE_ROOT, index_images, pixel_metrics):
 @app.cell
 def _(
     FIGS_DIR,
+    FIG_FORMATS,
     IMAGE_CHANNELS,
     IMAGE_INDEX,
     N_EXAMPLES,
     OVERWRITE,
+    PIXEL_SIZE_UM,
     Path,
     RANDOM_STATE,
     SITE_KEYS,
+    fig_image_montage,
     mo,
     np,
+    pf,
     pixel_metrics,
-    plt,
     qc_cells,
     read_image,
     resolve_image_path,
-    robust_rescale_image,
-    save_figure_protected,
+    shared_limits,
     site_flags,
 ):
-    def _site_image_path(site: dict, channel: str):
+    def _site_image(site: dict, channel: str):
+        """Image of one site and channel as an array, or None when the file is not found."""
+        path = None
         if pixel_metrics is not None:
             match = pixel_metrics
             for key in SITE_KEYS:
                 match = match[match[key].astype(str) == str(site[key])]
             match = match[match["Metadata_Channel"] == channel]
-            return Path(match["filepath"].iloc[0]) if len(match) else None
-        rows = qc_cells
-        for key in SITE_KEYS:
-            rows = rows[rows[key].astype(str) == str(site[key])]
-        if rows.empty or f"Image_FileName_{channel}" not in rows:
-            return None
-        return resolve_image_path(
-            rows[f"Image_PathName_{channel}"].iloc[0] if f"Image_PathName_{channel}" in rows else None,
-            rows[f"Image_FileName_{channel}"].iloc[0],
-            IMAGE_INDEX,
-        )
+            path = Path(match["filepath"].iloc[0]) if len(match) else None
+        else:
+            rows = qc_cells
+            for key in SITE_KEYS:
+                rows = rows[rows[key].astype(str) == str(site[key])]
+            if not rows.empty and f"Image_FileName_{channel}" in rows:
+                path = resolve_image_path(
+                    rows[f"Image_PathName_{channel}"].iloc[0] if f"Image_PathName_{channel}" in rows else None,
+                    rows[f"Image_FileName_{channel}"].iloc[0],
+                    IMAGE_INDEX,
+                )
+        return None if path is None else read_image(Path(path))
 
-    def _tile(ax, path, title):
-        ax.set_axis_off()
-        ax.set_title(title, fontsize=7)
-        if path is None:
-            ax.text(0.5, 0.5, "image not found", ha="center", va="center", fontsize=7, transform=ax.transAxes)
-            return False
-        image = read_image(Path(path))
-        ceiling = 65535 if image.max() > 255 else (255 if image.max() > 1 else 1.0)
-        rgb = np.repeat(robust_rescale_image(image)[..., None], 3, axis=2)
-        rgb[image >= 0.99 * ceiling] = (1.0, 0.0, 0.0)
-        ax.imshow(rgb)
-        return True
+    def _label(site: dict, note: str) -> str:
+        return f"{site['Metadata_Well']} site {site['Metadata_Site']}\n{note}"
 
     def _montage(channel: str):
         failed = site_flags[site_flags.get(f"blurred_{channel}", False) | site_flags.get(f"saturated_{channel}", False)]
@@ -711,38 +742,51 @@ def _(
             return None, 0
         rng = np.random.default_rng(RANDOM_STATE)
         failed = failed.iloc[rng.permutation(len(failed))[:N_EXAMPLES]]
-        passed = site_flags[site_flags["Metadata_image_qc"].eq("pass")]
-        fig, axes = plt.subplots(2, len(failed), figsize=(max(2.4 * len(failed), 4.8), 5.2), squeeze=False)
-        n_found = 0
-        for col, (_, site) in enumerate(failed.iterrows()):
-            same_plate = passed[passed["Metadata_Plate"] == site["Metadata_Plate"]]
-            partner = same_plate.iloc[rng.integers(len(same_plate))] if len(same_plate) else None
-            label = f"{site['Metadata_Well']} s{site['Metadata_Site']}"
-            reason = "blurred" if site.get(f"blurred_{channel}", False) else "saturated"
-            n_found += _tile(axes[0, col], _site_image_path(site, channel), f"FAIL ({reason})\n{label}")
-            if partner is not None:
-                _tile(axes[1, col], _site_image_path(partner, channel),
-                      f"pass\n{partner['Metadata_Well']} s{partner['Metadata_Site']}")
-            else:
-                axes[1, col].set_axis_off()
-        fig.suptitle(f"{channel}: flagged (top) vs. passing (bottom)", fontsize=10)
-        fig.tight_layout()
+        passing = site_flags[site_flags["Metadata_image_qc"].eq("pass")]
+        failed_tiles, passed_tiles = [], []
+        for _, site in failed.iterrows():
+            blurred, saturated = bool(site[f"blurred_{channel}"]), bool(site[f"saturated_{channel}"])
+            note = " and ".join(n for n, hit in (("blurred", blurred), ("saturated", saturated)) if hit)
+            failed_tiles.append((_label(site, note), _site_image(site, channel)))
+            same_plate = passing[passing["Metadata_Plate"] == site["Metadata_Plate"]]
+            if len(same_plate):
+                partner = same_plate.iloc[rng.integers(len(same_plate))]
+                passed_tiles.append((_label(partner, "pass"), _site_image(partner, channel)))
+        images = [im for _, im in passed_tiles if im is not None] or [im for _, im in failed_tiles if im is not None]
+        n_found = len(images)
+        if not images:
+            return None, 0
+        fig = pf.export(
+            fig_image_montage, f"image_qc_montage_{channel}", channel, failed_tiles, passed_tiles,
+            shared_limits(images), PIXEL_SIZE_UM,
+            outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
+        )
         return fig, n_found
 
     _panels = []
     for _ch in IMAGE_CHANNELS:
         _fig, _n_found = _montage(_ch)
         if _fig is None:
-            _panels.append(mo.md(f"**{_ch}:** no flagged sites."))
+            _panels.append(mo.md(f"**{_ch}:** no flagged sites, or images not found. "
+                                 "Set the raw image folder in section 1 so file names can be matched."))
             continue
-        save_figure_protected(_fig, FIGS_DIR / f"image_qc_montage_{_ch}.png", overwrite=OVERWRITE, dpi=150)
         _panels.append(_fig)
-        if _n_found == 0:
-            _panels.append(mo.callout(mo.md(
-                "Images not found. Set the raw image folder in section 1 so file names can be matched."
-            ), kind="warn"))
     mo.vstack(_panels) if _panels else mo.md("_No image-QC channels — no montages._")
     return
+
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    **What to notice:** blurred sites lack sharp edges and fine texture compared with the
+    passing sites below them; saturated sites show large magenta areas.
+
+    **Do not conclude:** from a few examples. They are random, not the worst cases. If you
+    doubt a limit, change it under **Advanced settings** and rerun.
+    """)
+    return
+
 
 
 @app.cell
@@ -822,14 +866,15 @@ def _(
 def _(
     ACTIVE_CONDITIONS,
     FIGS_DIR,
+    FIG_FORMATS,
     OVERWRITE,
     PROFILE_CONDITIONS,
     cell_flags,
     cell_status,
+    fig_profile_qc_rates,
     mo,
-    plt,
+    pf,
     qc_cells,
-    save_figure_protected,
 ):
     _flags = cell_flags.assign(Metadata_Plate=qc_cells["Metadata_Plate"].to_numpy())
     _condition_cols = [f"Metadata_cqc_{n}_is_outlier" for n in PROFILE_CONDITIONS]
@@ -844,40 +889,62 @@ def _(
     _overlap = cell_flags[[f"Metadata_cqc_{n}_is_outlier" for n in ACTIVE_CONDITIONS]].sum(axis=1)
     condition_overlap = _overlap.value_counts().sort_index().rename_axis("active conditions tripped").to_frame("cells")
 
-    _fig, _ax = plt.subplots(figsize=(7, 3.2))
-    profile_qc_summary.drop(columns=["profile_qc_fail %"]).plot.bar(ax=_ax, width=0.8)
-    _ax.set(ylabel="% of cells flagged", xlabel="", title="coSMicQC flags per plate (all conditions, active or not)")
-    _ax.legend(fontsize=7, frameon=False)
-    _fig.tight_layout()
-    save_figure_protected(_fig, FIGS_DIR / "profile_qc_rates.png", overwrite=OVERWRITE, dpi=150)
+    _rates = profile_qc_summary[[f"{n} %" for n in PROFILE_CONDITIONS]].set_axis(list(PROFILE_CONDITIONS), axis=1)
+    _fig = pf.export(
+        fig_profile_qc_rates, "profile_qc_rates", _rates,
+        100 * cell_status["Metadata_profile_qc"].eq("fail").mean(), ACTIVE_CONDITIONS,
+        outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
+    )
     mo.vstack([profile_qc_summary, condition_overlap, _fig])
     return
 
 
+
 @app.cell
-def _(
-    FIGS_DIR,
-    OVERWRITE,
-    PROFILE_CONDITIONS,
-    plt,
-    qc_cells,
-    save_figure_protected,
-):
-    # Per-plate z-scores (population SD, as coSMicQC uses) with each threshold.
-    _features = [(f, z) for t in PROFILE_CONDITIONS.values() for f, z in t.items()]
-    _fig, _axes = plt.subplots(1, len(_features), figsize=(3.6 * len(_features), 3.0), squeeze=False)
-    for _ax, (_feature, _threshold) in zip(_axes[0], _features):
-        _grouped = qc_cells.groupby("Metadata_Plate")[_feature]
-        _z = (qc_cells[_feature] - _grouped.transform("mean")) / _grouped.transform("std", ddof=0)
-        _ax.hist(_z.dropna().clip(-8, 8), bins=80, color="0.55")
-        _ax.axvline(_threshold, color="crimson", ls="--")
-        _ax.set_title(_feature.replace("_Intensity_", "\n").replace("_AreaShape_", "\n"), fontsize=8)
-        _ax.set(xlabel="z (per plate)", yscale="log")
-    _fig.suptitle("Feature distributions and coSMicQC thresholds (red)", fontsize=10)
-    _fig.tight_layout()
-    save_figure_protected(_fig, FIGS_DIR / "profile_qc_feature_z.png", overwrite=OVERWRITE, dpi=150)
-    _fig
+def _(mo):
+    mo.md(r"""
+    **What to notice:** rates should be similar across plates of the same experiment. One
+    plate far above the others suggests a plate-level problem (focus, density, staining)
+    rather than random segmentation errors.
+
+    **Do not conclude:** that a high rate means bad cells. A rule can flag real biology
+    (large or dividing cells). Sections 5 and 6 and the crops below test that.
+    """)
     return
+
+
+
+@app.cell
+def _(FIGS_DIR, FIG_FORMATS, OVERWRITE, PROFILE_CONDITIONS, fig_feature_z, pf, qc_cells):
+    # Per-plate z-scores (population SD, as coSMicQC uses), one entry per feature with its limit.
+    _z_by_feature = {}
+    for _thresholds in PROFILE_CONDITIONS.values():
+        for _feature, _limit in _thresholds.items():
+            if _feature in _z_by_feature:
+                continue
+            _grouped = qc_cells.groupby("Metadata_Plate")[_feature]
+            _z = (qc_cells[_feature] - _grouped.transform("mean")) / _grouped.transform("std", ddof=0)
+            _z_by_feature[_feature] = (_z.to_numpy(dtype=float), _limit)
+    pf.export(
+        fig_feature_z, "profile_qc_feature_z", _z_by_feature,
+        outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
+    )
+    return
+
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    **What to notice:** where each limit sits relative to the main group of cells. A limit
+    that cuts through the main group flags ordinary cells; the headline gives the share of
+    cells beyond the limits.
+
+    **Do not conclude:** that the limits are right for this assay. They are the published
+    starting points. The crops below show whether the cells beyond them look wrong.
+    """)
+    return
+
 
 
 @app.cell
@@ -885,35 +952,39 @@ def _(mo):
     mo.md(r"""
     ### Crops: flagged vs. passing cells
 
-    One row per condition: random cells that trip it (top) and random passing
-    cells from the same plates (bottom), cropped around the nucleus centre on
-    the nuclear-stain image. Merged nuclei, irregular masks and doublets
-    should be visible in the top rows. If top and bottom rows look the same,
-    the condition is flagging normal cells.
+    For each rule, one row of random cells that trip it (FAIL) and one row of random passing
+    cells from the same plates (pass), cropped around the nucleus centre (+) on the
+    nuclear-stain image. Merged nuclei, irregular masks and doublets should be visible in the
+    FAIL rows. If the FAIL and pass rows look the same, the rule is flagging normal cells.
+    Brightness is scaled per field of view, not per crop.
     """)
     return
+
 
 
 @app.cell
 def _(
     DNA_CHANNEL,
     FIGS_DIR,
+    FIG_FORMATS,
     IMAGE_INDEX,
     N_EXAMPLES,
     OVERWRITE,
+    PIXEL_SIZE_UM,
     PROFILE_CONDITIONS,
     RANDOM_STATE,
     cell_flags,
     cell_status,
     crop_centered,
+    fig_cell_crops,
     mo,
     np,
-    plt,
+    pf,
     qc_cells,
     read_image,
+    readable,
     resolve_image_path,
     robust_rescale_image,
-    save_figure_protected,
 ):
     _x_col = next((c for c in ("Nuclei_Location_Center_X", "Nuclei_AreaShape_Center_X") if c in qc_cells), None)
     _y_col = _x_col.replace("_X", "_Y") if _x_col else None
@@ -936,31 +1007,37 @@ def _(
 
     _rng = np.random.default_rng(RANDOM_STATE)
     _passed = cell_status.index[cell_status["Metadata_profile_qc"].eq("pass")]
-    _fig, _axes = plt.subplots(
-        2 * len(PROFILE_CONDITIONS), N_EXAMPLES, figsize=(1.3 * N_EXAMPLES, 2.7 * len(PROFILE_CONDITIONS)), squeeze=False
-    )
-    _n_shown = 0
-    for _r, _name in enumerate(PROFILE_CONDITIONS):
+    _blocks = []
+    for _name in PROFILE_CONDITIONS:
         _hits = cell_flags.index[cell_flags[f"Metadata_cqc_{_name}_is_outlier"]]
-        for _block, (_label, _pool) in enumerate((("FAIL", _hits), ("pass", _passed))):
+        for _label, _pool in ((f"FAIL: {readable(_name)}", _hits), ("pass: random cells for comparison", _passed)):
             _chosen = _rng.choice(_pool, size=min(N_EXAMPLES, len(_pool)), replace=False) if len(_pool) else []
-            for _c in range(N_EXAMPLES):
-                _ax = _axes[2 * _r + _block, _c]
-                _ax.set_axis_off()
-                if _c < len(_chosen):
-                    _image = _crop(_chosen[_c])
-                    if _image is not None:
-                        _ax.imshow(_image, cmap="gray")
-                        _ax.plot(40, 40, "+", color="yellow", ms=6)
-                        _n_shown += 1
-            _axes[2 * _r + _block, 0].set_title(f"{_label}: {_name}", fontsize=7, loc="left")
-    _fig.tight_layout()
-    save_figure_protected(_fig, FIGS_DIR / "profile_qc_cell_crops.png", overwrite=OVERWRITE, dpi=150)
-    mo.vstack(
-        [_fig]
-        + ([mo.callout(mo.md("Images not found. Set the raw image folder in section 1."), kind="warn")] if _n_shown == 0 else [])
+            _blocks.append((_label, [_crop(_i) for _i in _chosen]))
+    _shown = sum(c is not None for _, crops in _blocks for c in crops)
+    mo.stop(
+        _shown == 0,
+        mo.callout(mo.md("Images not found. Set the raw image folder in section 1."), kind="warn"),
+    )
+    pf.export(
+        fig_cell_crops, "profile_qc_cell_crops", _blocks, N_EXAMPLES, PIXEL_SIZE_UM,
+        outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
     )
     return
+
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    **What to notice:** FAIL rows should show merged or touching nuclei, ragged masks or
+    doublets that the pass rows do not.
+
+    **Do not conclude:** that a rule is wrong because a few FAIL crops look normal; no
+    rule is perfect. If most of a FAIL row looks like the pass row, switch that rule off.
+    Crops were picked at random, so they show the typical case, not the worst.
+    """)
+    return
+
 
 
 @app.cell
@@ -1031,35 +1108,29 @@ def _(
 
 
 @app.cell
-def _(
-    DNA_CHANNEL,
-    FIGS_DIR,
-    OVERWRITE,
-    dna_peaks,
-    np,
-    plt,
-    qc_cells,
-    save_figure_protected,
-):
-    _plates = list(dna_peaks["Metadata_Plate"])
-    _fig, _axes = plt.subplots(1, len(_plates), figsize=(5 * len(_plates), 3.4), squeeze=False)
-    _values = qc_cells[f"Nuclei_Intensity_IntegratedIntensity_{DNA_CHANNEL}"]
-    for _ax, (_, _peak) in zip(_axes[0], dna_peaks.iterrows()):
-        _x = _values[(qc_cells["Metadata_Plate"] == _peak["Metadata_Plate"]).to_numpy() & (_values > 0).to_numpy()]
-        _ax.hist(np.log2(_x), bins=120, color="0.6")
-        if np.isfinite(_peak["g1_peak"]):
-            _g1 = np.log2(_peak["g1_peak"])
-            _ax.axvline(_g1, color="tab:blue", label="G1 peak")
-            _ax.axvline(_g1 + 1, color="tab:blue", ls=":", label="2× G1 (expected G2/M)")
-            _ax.axvspan(_g1 + np.log2(1.6), _g1 + np.log2(2.5), color="tab:orange", alpha=0.12, label="G2/M window")
-        if np.isfinite(_peak["g2_peak"]):
-            _ax.axvline(np.log2(_peak["g2_peak"]), color="tab:orange", label=f"G2/M peak ({_peak['g2_g1_ratio']:.2f}×)")
-        _ax.set(title=str(_peak["Metadata_Plate"]), xlabel=f"log2 integrated {DNA_CHANNEL} (nucleus)", ylabel="cells")
-        _ax.legend(fontsize=7, frameon=False)
-    _fig.tight_layout()
-    save_figure_protected(_fig, FIGS_DIR / "dna_content_histograms.png", overwrite=OVERWRITE, dpi=150)
-    _fig
+def _(DNA_CHANNEL, FIGS_DIR, FIG_FORMATS, OVERWRITE, dna_peaks, fig_dna_content, pf, qc_cells):
+    _column = f"Nuclei_Intensity_IntegratedIntensity_{DNA_CHANNEL}"
+    _plate = qc_cells["Metadata_Plate"].astype(str)
+    _values = {str(p): qc_cells.loc[_plate == str(p), _column].to_numpy(dtype=float) for p in dna_peaks["Metadata_Plate"]}
+    pf.export(
+        fig_dna_content, "dna_content_histograms", dna_peaks, _values, DNA_CHANNEL,
+        outdir=FIGS_DIR, formats=FIG_FORMATS, overwrite=OVERWRITE, return_fig=True,
+    )
     return
+
+
+
+@app.cell
+def _(mo):
+    mo.md(r"""
+    **What to notice:** a second peak inside the shaded window means the stain follows DNA
+    content, which supports H1. Its height relative to G1 is the share of dividing cells.
+
+    **Do not conclude:** biology from a missing peak alone. Confluent or arrested cells,
+    a stain that is not proportional to DNA, or merged nuclei give the same picture.
+    """)
+    return
+
 
 
 @app.cell
@@ -1281,6 +1352,7 @@ def _(
     INPUT_PATHS,
     OUTPUT_PATHS,
     OVERWRITE,
+    PIXEL_SIZE_UM,
     PROFILE_CONDITIONS,
     RANDOM_STATE,
     REPO_ROOT,
@@ -1309,6 +1381,8 @@ def _(
                 "cosmicqc_conditions": PROFILE_CONDITIONS,
                 "active_conditions": ACTIVE_CONDITIONS,
                 "random_state": RANDOM_STATE,
+                "figure_style": "publication-figures (hca_pipeline.pubfig, generic)",
+                "pixel_size_um": PIXEL_SIZE_UM,
             },
             "dataset": removal_summary.iloc[0].to_dict(),
             "environment": {
@@ -1386,7 +1460,8 @@ def _(mo):
     - `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet` — read by NB01
     - `results/data_qc/site_qc.csv`, `cell_qc.parquet` — full flag tables
     - `results/data_qc/dna_content_peaks.csv`, `dna_content_per_well.csv` — cell-cycle check
-    - `figures/data_qc/*.png` — distributions, plate maps, montages, crops, DNA histograms
+    - `figures/data_qc/*.pdf`, `*.png` — distributions, plate maps, montages, crops, DNA histograms
+      (paper versions); `*_explained.png` — the same with headline and how-to-read line
     - `results/data_qc/provenance_nb00_latest.json` — run provenance
     """)
     return

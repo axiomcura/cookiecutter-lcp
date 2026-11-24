@@ -33,7 +33,7 @@ of those notebooks as a substitute for actually reviewing them.
 
 | Step | Notebook | Input | Output | What it does |
 |------|----------|-------|--------|-------------|
-| 0 of 6 | `00_data_qc.py` | CellProfiler SQLite / `Per_*` CSVs; optional raw images | `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet`, `site_qc.csv`, `cell_qc.parquet`, DNA-content tables, `figures/data_qc/*.png` | Flags only: image QC (blur, saturation per site and channel), single-cell QC with coSMicQC, DNA-content (G1/G2) check; montages and cell crops for review — see [Data QC (NB00)](#data-qc-nb00) |
+| 0 of 6 | `00_data_qc.py` | CellProfiler SQLite / `Per_*` CSVs; optional raw images | `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet`, `site_qc.csv`, `cell_qc.parquet`, DNA-content tables, `figures/data_qc/*.pdf`, `*.png` | Flags only: image QC (blur, saturation per site and channel), single-cell QC with coSMicQC, DNA-content (G1/G2) check; montages and cell crops for review — see [Data QC (NB00)](#data-qc-nb00) |
 | 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional NB00 `site_qc.csv` and `cell_qc.parquet` (and the image-quality extra's `excluded_sites.csv`) | `single_cell_profiles_qc.parquet` (+ `Metadata_image_qc`, `Metadata_profile_qc`) | Read/consolidate all discovered plates, label every cell pass/fail from NB00 (and the image-quality extra) and remove the failing cells (checkboxes), select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
 | 2 of 6 | `02_aggregate_normalize_featureselect.py` | `single_cell_profiles_qc.parquet` | `per_well_features_selected.parquet` | Filter to NB01's selected plate scope, annotate with platemap, aggregate to well-level, mad_robustize normalization, feature selection (SC-06→SC-10) |
 | 3 of 6 | `03_quality_metrics.py` | `per_well_features_selected.parquet` | `results/quality_metrics/*.csv`, `figures/quality_metrics/*.png` | Percent Replicating, mAP, batch assessment, dose-response, Go/No-Go decision (SC-18→SC-22) — runs **before** biological interpretation, so profiling/fingerprints/single-cell analysis only happen on data that already cleared the replicate-signal bar |
@@ -133,6 +133,14 @@ skips image QC with a warning.
 | `site_qc.csv`, `cell_qc.parquet` | every site / cell with all flags | review |
 | `dna_content_peaks.csv`, `dna_content_per_well.csv` | G1/G2 peaks per plate; cell-cycle fractions per well | review |
 | `provenance_nb00_latest.json` | schema-v2 provenance | audit |
+
+**Figures** (`analysis/{EXPERIMENT_ID}/figures/data_qc/`) follow the `publication-figures` skill. The
+drawing code is in `hca_pipeline/data_qc_figures.py`; the style and export helper is
+`hca_pipeline/pubfig.py`. Each figure is saved three ways: `<name>.pdf` and `<name>.png` at paper size
+(no title; the caption carries the finding) and `<name>_explained.png` with a plain-language headline and
+how-to-read line, as shown in the notebook. Compared images share one brightness scale, pixels at the
+detector ceiling are magenta, and scale bars appear when the pixel size is set under Advanced settings.
+Existing figure files are kept unless **Overwrite existing outputs** is on.
 
 **QC labels on every cell.** NB01 adds two columns to `single_cell_profiles_qc.parquet`
 (and the CSV copy). Both are `pass`, `fail` or `not assessed` (that QC was not run):
