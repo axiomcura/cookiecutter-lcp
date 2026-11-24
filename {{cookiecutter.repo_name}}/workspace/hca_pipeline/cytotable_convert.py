@@ -1,337 +1,332 @@
-"""Convert CellProfiler output (SQLite, Per_* CSV tables, or one merged CSV) to Parquet with CytoTable.
+"""Convert raw CellProfiler output to Parquet files with CytoTable.
 
-The Parquet files hold one row per cell with the **same columns and values** as the pandas readers
-in :mod:`hca_pipeline.io` (``read_cellprofiler_sqlite``, ``read_cellprofiler_csvs``). Column names
-are not changed (``ImageNumber``, ``Image_Metadata_Plate``, ``Cells_Number_Object_Number``, ...),
-so later notebooks can read only the columns they need.
+This module turns the tables that CellProfiler writes into one Parquet file per CellProfiler run,
+with one row per cell. The notebook ``00_convert_to_parquet.py`` calls :func:`convert_to_parquet`.
+The data quality control (QC) notebook, ``01_data_qc.py``, reads the result with
+:func:`read_qc_columns`.
 
-Why a custom join: CytoTable's built-in CellProfiler join keeps only ``Image_FileName_*`` from the
-image table. Data QC also needs ``Image_ImageQuality_*``, ``Image_PathName_*`` and
-``Image_Count_*``, so the join here keeps every image column.
+Notes
+-----
+Terms used in this module:
+
+run
+    One execution of a CellProfiler pipeline, usually one plate. CellProfiler restarts
+    ``ImageNumber`` at 1 in every run, so each run is converted on its own.
+preset
+    A saved set of CytoTable settings for one data layout: which tables hold cells, nuclei and
+    cytoplasm, and which columns identify an object.
+join
+    The step that combines the Image, Cells, Cytoplasm and Nuclei tables into one row per cell.
+
+CytoTable has one preset for each CellProfiler export module:
+
+=====================  ==========================================================  =======================
+CellProfiler module    Files                                                       CytoTable preset
+=====================  ==========================================================  =======================
+ExportToDatabase       ``<name>.sqlite`` with the tables Per_Image, Per_Cells,     ``cellprofiler_sqlite``
+                       Per_Cytoplasm and Per_Nuclei
+ExportToSpreadsheet    a folder with Image.csv, Cells.csv, Cytoplasm.csv and       ``cellprofiler_csv``
+                       Nuclei.csv
+=====================  ==========================================================  =======================
+
+This module uses both presets as they are, except for the join. The preset joins keep only the
+image file names from the Image table (the SQLite preset also keeps well and plate). Data QC needs
+more image columns: plate, well and site, ``Image_ImageQuality_*`` (blur and saturation) and
+``Image_PathName_*``. The joins in this module therefore keep every image column. They keep a cell
+under the same rule as the presets: its cytoplasm object must have a parent cell, a parent nucleus
+and an image.
 """
 from __future__ import annotations
 
 import os
-import re
 import shutil
-import sqlite3
-import time
-from dataclasses import dataclass
+from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Sequence
 
 import pandas as pd
 import pyarrow.parquet as pq
 
-from .io import discover_single_cell_inputs
+# CytoTable finds a CSV table by its file name without the extension, in any case.
+CSV_TABLES = ("image", "cells", "cytoplasm", "nuclei")
 
-KINDS = ("sqlite", "csv_tables", "csv_merged")
+# Setting modified join queres for CytoTable. The preset joins keep only the image
+# file names from the Image table (the SQLite preset also keeps well and plate). 
+# Data QC needs more image columns: plate, well and site, "Image_ImageQuality_*" 
+# (blur and saturation) and "Image_PathName_*". (requirded for qc notebook)
 
-# Same table aliases as hca_pipeline.io (logical name -> accepted table / file names, lower case).
-TABLE_ALIASES = {
-    "image": ("per_image", "image"),
-    "cells": ("per_cells", "cells"),
-    "cytoplasm": ("per_cytoplasm", "cytoplasm"),
-    "nuclei": ("per_nuclei", "nuclei"),
-}
-COMPARTMENTS = ("cells", "nuclei", "cytoplasm")
-PAGE_KEYS = {
-    "image": "ImageNumber",
-    "cells": "Cells_Number_Object_Number",
-    "nuclei": "Nuclei_Number_Object_Number",
-    "cytoplasm": "Cytoplasm_Number_Object_Number",
-    "join": "Cytoplasm_Number_Object_Number",
-}
-# A merged table needs a numeric column to page through; the first one present is used.
-MERGED_PAGE_KEYS = ("ImageNumber", "Cells_Number_Object_Number", "Nuclei_Number_Object_Number")
+# Join for ExportToDatabase (SQLite). Column names already start with the table name
+# (Cells_Number_Object_Number). The preset renames ImageNumber to Metadata_ImageNumber;
+# this join names it ImageNumber again, because the data-QC notebook matches cells on it.
+SQLITE_JOIN = """
+SELECT image.Metadata_ImageNumber AS ImageNumber,
+       image.* EXCLUDE (Metadata_ImageNumber),
+       cytoplasm.* EXCLUDE (Metadata_ImageNumber),
+       cells.* EXCLUDE (Metadata_ImageNumber),
+       nuclei.* EXCLUDE (Metadata_ImageNumber)
+FROM read_parquet('per_cytoplasm.parquet') AS cytoplasm
+JOIN read_parquet('per_cells.parquet') AS cells
+  ON cells.Metadata_ImageNumber = cytoplasm.Metadata_ImageNumber
+ AND cells.Cells_Number_Object_Number = cytoplasm.Cytoplasm_Parent_Cells
+JOIN read_parquet('per_nuclei.parquet') AS nuclei
+  ON nuclei.Metadata_ImageNumber = cytoplasm.Metadata_ImageNumber
+ AND nuclei.Nuclei_Number_Object_Number = cytoplasm.Cytoplasm_Parent_Nuclei
+JOIN read_parquet('per_image.parquet') AS image
+  ON image.Metadata_ImageNumber = cytoplasm.Metadata_ImageNumber
+"""
 
-
-@dataclass(frozen=True)
-class RawInput:
-    """One thing to convert: a SQLite file, a set of Per_* CSV tables, or one merged CSV."""
-
-    kind: str
-    name: str  # output file stem
-    paths: tuple[Path, ...]
-
-
-@dataclass(frozen=True)
-class ConversionResult:
-    path: Path
-    status: str  # "converted", "replaced" or "preserved"
-    rows: int
-    seconds: float
+# Join for ExportToSpreadsheet (CSV). Column names do not start with the table name; the preset
+# adds it (AreaShape_Area in Cells.csv becomes Cells_AreaShape_Area) and renames ObjectNumber and
+# Parent_* to Metadata_ObjectNumber and Metadata_<Table>_Parent_*.
+CSV_JOIN = """
+SELECT image.*,
+       cytoplasm.* EXCLUDE (Metadata_ImageNumber),
+       cells.* EXCLUDE (Metadata_ImageNumber, Metadata_ObjectNumber),
+       nuclei.* EXCLUDE (Metadata_ImageNumber, Metadata_ObjectNumber)
+FROM read_parquet('cytoplasm.parquet') AS cytoplasm
+JOIN read_parquet('cells.parquet') AS cells
+  ON cells.Metadata_ImageNumber = cytoplasm.Metadata_ImageNumber
+ AND cells.Metadata_ObjectNumber = cytoplasm.Metadata_Cytoplasm_Parent_Cells
+JOIN read_parquet('nuclei.parquet') AS nuclei
+  ON nuclei.Metadata_ImageNumber = cytoplasm.Metadata_ImageNumber
+ AND nuclei.Metadata_ObjectNumber = cytoplasm.Metadata_Cytoplasm_Parent_Nuclei
+JOIN ({image_columns} FROM read_parquet('image.parquet')) AS image
+  ON image.ImageNumber = cytoplasm.Metadata_ImageNumber
+"""
+# The CSV preset adds "Image_" only to image columns that do not already start with "Image".
+# ImageQuality_PowerLogLogSlope_DNA therefore keeps its raw name. These two parts of the image
+# query rename it to Image_ImageQuality_PowerLogLogSlope_DNA, the name the SQLite output uses.
+CSV_IMAGE_COLUMNS = (
+    "SELECT Metadata_ImageNumber AS ImageNumber, "
+    "COLUMNS(c -> c <> 'Metadata_ImageNumber' AND NOT starts_with(c, 'ImageQuality_'))"
+)
+CSV_IMAGE_QUALITY = r", COLUMNS('^ImageQuality_(.*)') AS 'Image_ImageQuality_\1'"
 
 
 def parquet_dir(analysis_dir: Path) -> Path:
-    """Where the converted Parquet files live: ``analysis/<EXPERIMENT_ID>/outputs/parquet``."""
+    """Return the folder for the converted Parquet files of one experiment.
+
+    Parameters
+    ----------
+    analysis_dir : Path
+        The experiment's analysis folder, ``workspace/analysis/<EXPERIMENT_ID>``.
+
+    Returns
+    -------
+    Path
+        ``<analysis_dir>/outputs/parquet``. The data-QC notebook reads its input from here.
+    """
     return Path(analysis_dir) / "outputs" / "parquet"
 
 
-# --------------------------------------------------------------------------- finding inputs
-def _logical_table(stem: str) -> str | None:
-    stem = stem.lower()
-    return next((name for name, aliases in TABLE_ALIASES.items() if stem in aliases), None)
+def convert_to_parquet(
+    source_dir: Path,
+    dest_dir: Path,
+    *,
+    overwrite: bool = False,
+    chunk_size: int = 10_000,
+    max_threads: int = 4,
+    progress: Callable[[str], None] = print,
+) -> list[Path]:
+    """Convert every CellProfiler run in a folder to one Parquet file per run.
 
+    The function searches ``source_dir`` and its subfolders. Each ``.sqlite`` file is one run.
+    Each folder that holds Image.csv is one run. CytoTable converts each run with its CellProfiler
+    preset and the join of this module (see the module notes).
 
-def detect_raw_inputs(backend_dir: Path) -> list[RawInput]:
-    """Find what to convert in ``workspace/backend/<EXPERIMENT_ID>/``.
+    Parameters
+    ----------
+    source_dir : Path
+        Folder with the raw CellProfiler output, usually ``workspace/backend/<EXPERIMENT_ID>``.
+    dest_dir : Path
+        Folder for the Parquet files. It is created if it does not exist.
+    overwrite : bool, default False
+        If False, an existing Parquet file is kept and not converted again. Set it to True after
+        you replace the raw files.
+    chunk_size : int, default 10_000
+        Number of rows CytoTable reads at a time. A larger value is faster and uses more memory.
+    max_threads : int, default 4
+        Number of threads CytoTable uses.
+    progress : callable, default print
+        Receives one line of text for each step, for example
+        ``"wrote      PlateA.parquet: 48,210 cells"``.
 
-    SQLite files win over CSV files (as in the other notebooks). CSV files must be either the four
-    CellProfiler tables (Per_Image, Per_Cells, Per_Cytoplasm, Per_Nuclei) or exactly one merged
-    single-cell CSV; anything else is rejected rather than guessed.
+    Returns
+    -------
+    list of Path
+        One Parquet file per run, including files that were kept. The file name is the run's path
+        below ``source_dir``, joined with "_": ``PlateA/P1.sqlite`` gives ``PlateA_P1.parquet``.
+        The list is empty if the folder holds no CellProfiler output.
+
+    Raises
+    ------
+    ValueError
+        If a CSV folder misses one of the four tables, if one CSV run folder lies inside another,
+        or if the folder holds ``.db`` files but no ``.sqlite`` file.
+
+    Notes
+    -----
+    If the folder holds both SQLite files and CSV files, only the SQLite files are converted.
+    The function writes temporary files to ``dest_dir/.cytotable_work_<name>`` and deletes them
+    afterwards, also when the conversion fails.
+
+    Examples
+    --------
+    >>> convert_to_parquet(Path("workspace/backend/EXP"), Path("workspace/analysis/EXP/outputs/parquet"))
+    [PosixPath('workspace/analysis/EXP/outputs/parquet/PlateA.parquet')]
     """
-    found = discover_single_cell_inputs(Path(backend_dir))
-    if found["sqlite"]:
-        return [RawInput("sqlite", p.stem, (p,)) for p in found["sqlite"]]
-    csvs = found["csv"]
-    if not csvs:
-        return []
-    tables = {_logical_table(p.stem): p for p in csvs if _logical_table(p.stem)}
-    if len(tables) == len(TABLE_ALIASES):
-        return [RawInput("csv_tables", Path(backend_dir).name, tuple(tables[k] for k in TABLE_ALIASES))]
-    if len(csvs) == 1:
-        return [RawInput("csv_merged", csvs[0].stem, (csvs[0],))]
-    raise ValueError(
-        f"Cannot tell how to convert {[p.name for p in csvs]} in {backend_dir}. Expected either the four "
-        "CellProfiler tables (Per_Image.csv, Per_Cells.csv, Per_Cytoplasm.csv, Per_Nuclei.csv) or exactly "
-        "one merged CSV. Move the other CSV files out of this folder."
-    )
-
-
-# --------------------------------------------------------------------------- conversion
-def _cytotable_config(max_threads: int, run_dir: Path):
-    """Run CytoTable in threads: no subprocesses (works on Windows, no PATH lookup of parsl helpers).
-
-    Parsl writes a ``runinfo`` folder into the current directory by default; ``run_dir`` sends it to
-    the scratch folder that is deleted after the conversion.
-    """
+    import cytotable
     from parsl.config import Config
     from parsl.executors.threads import ThreadPoolExecutor
 
-    return Config(
-        executors=[ThreadPoolExecutor(max_threads=max_threads, label="cytotable")], run_dir=str(run_dir)
-    )
-
-
-def _reset_parsl() -> None:
-    """Drop a half-finished parsl session from an earlier failed call, so the next call can start."""
-    import parsl
-
-    try:
-        parsl.dfk().cleanup()
-    except Exception:  # no session loaded: nothing to clean
-        pass
-    try:
-        parsl.clear()
-    except Exception:
-        pass
-
-
-def _join_sql(stems: dict[str, str]) -> str:
-    """Inner join of the four tables: one row per cell (same rule as ``io._read_cellprofiler_tables``).
-
-    ``stems`` maps logical table -> CytoTable's Parquet file stem. The image key is renamed back
-    from CytoTable's ``Metadata_ImageNumber`` to ``ImageNumber``.
-    """
-    for stem in stems.values():
-        if not re.fullmatch(r"\w+", stem):
-            raise ValueError(f"Unsupported table name {stem!r}: use letters, digits and underscores.")
-    cyto, cells, nuclei, image = (stems[k] for k in ("cytoplasm", "cells", "nuclei", "image"))
-    key = "Metadata_ImageNumber"
-    return f"""
-SELECT {cyto}.{key} AS ImageNumber,
-       {cyto}.* EXCLUDE ({key}),
-       {cells}.* EXCLUDE ({key}),
-       {nuclei}.* EXCLUDE ({key}),
-       {image}.* EXCLUDE ({key})
-FROM read_parquet('{cyto}.parquet') AS {cyto}
-JOIN read_parquet('{cells}.parquet') AS {cells}
-  ON {cyto}.{key} = {cells}.{key} AND {cyto}.Cytoplasm_Parent_Cells = {cells}.Cells_Number_Object_Number
-JOIN read_parquet('{nuclei}.parquet') AS {nuclei}
-  ON {cyto}.{key} = {nuclei}.{key} AND {cyto}.Cytoplasm_Parent_Nuclei = {nuclei}.Nuclei_Number_Object_Number
-JOIN read_parquet('{image}.parquet') AS {image}
-  ON {cyto}.{key} = {image}.{key}
-"""
-
-
-def _stage(source: Path, target: Path) -> None:
-    """Make ``target`` show the same bytes as ``source`` without copying when possible."""
-    for make in (os.link, os.symlink):
-        try:
-            make(source, target)
-            return
-        except OSError:
-            continue
-    shutil.copy2(source, target)
-
-
-def _sqlite_table_names(path: Path) -> dict[str, str]:
-    """Logical table -> real table name in the SQLite file (accepts Per_Cells or Cells, any case)."""
-    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
-        available = {r[0].lower(): r[0] for r in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    names = {}
-    for logical, aliases in TABLE_ALIASES.items():
-        match = next((a for a in aliases if a in available), None)
-        if match is None:
-            raise ValueError(f"{path.name}: no table for '{logical}' (looked for {', '.join(aliases)}).")
-        names[logical] = available[match]
-    return names
-
-
-def _sqlite_stems(path: Path) -> dict[str, str]:
-    """CytoTable names each table's Parquet file after the lower-case table name."""
-    return {logical: name.lower() for logical, name in _sqlite_table_names(path).items()}
-
-
-def _convert_tables(source_path: Path, datatype: str, stems: dict[str, str], work: Path, chunk_size: int,
-                    max_threads: int) -> Path:
-    import cytotable
-
-    out = cytotable.convert(
-        source_path=str(source_path),
-        dest_path=str(work / "joined.parquet"),
-        dest_datatype="parquet",
-        source_datatype=datatype,
-        preset=None,
-        compartments=COMPARTMENTS,
-        metadata=("image",),
-        identifying_columns=("ImageNumber",),
-        page_keys=PAGE_KEYS,
-        chunk_size=chunk_size,
-        join=True,
-        joins=_join_sql(stems),
-        parsl_config=_cytotable_config(max_threads, work / "parsl_run"),
-    )
-    return Path(out)
-
-
-def _convert_merged(csv_path: Path, work: Path, chunk_size: int, max_threads: int) -> Path:
-    import cytotable
-
-    header = list(pd.read_csv(csv_path, nrows=0).columns)
-    page_key = next((c for c in MERGED_PAGE_KEYS if c in header), None)
-    if page_key is None:
-        raise ValueError(
-            f"{csv_path.name} has none of {', '.join(MERGED_PAGE_KEYS)}. A merged CSV needs a numeric "
-            "ImageNumber column (as written by CellProfiler) so it can be converted in chunks."
-        )
-    stage = work / "stage"
-    stage.mkdir(parents=True)
-    _stage(csv_path, stage / "merged.csv")
-    cytotable.convert(
-        source_path=str(stage),
-        dest_path=str(work / "merged_out"),
-        dest_datatype="parquet",
-        source_datatype="csv",
-        preset=None,
-        compartments=[],  # no compartments: CytoTable then leaves every column name unchanged
-        metadata=[],
-        page_keys={"merged": page_key},
-        chunk_size=chunk_size,
-        join=False,
-        concat=True,
-        parsl_config=_cytotable_config(max_threads, work / "parsl_run"),
-    )
-    files = [p for p in (work / "merged_out").rglob("*.parquet") if p.is_file()]
-    if len(files) != 1:
-        raise RuntimeError(f"Expected one Parquet file from {csv_path.name}, found {len(files)}.")
-    return files[0]
-
-
-def convert_raw_input(raw: RawInput, dest_dir: Path, *, overwrite: bool = False, chunk_size: int = 10_000,
-                      max_threads: int = 4) -> ConversionResult:
-    """Convert one input to ``dest_dir/<name>.parquet`` with CytoTable.
-
-    An existing output is kept unless ``overwrite`` is true (use :func:`is_stale` to warn when the
-    raw file is newer). Scratch files go to a temporary folder inside ``dest_dir`` that is removed.
-    """
-    if raw.kind not in KINDS:
-        raise ValueError(f"Unknown input kind {raw.kind!r}; expected one of {KINDS}.")
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    final = dest_dir / f"{raw.name}.parquet"
-    started = time.perf_counter()
-    existed = final.is_file()
-    if existed and not overwrite:
-        return ConversionResult(final, "preserved", pq.ParquetFile(final).metadata.num_rows, 0.0)
+    outputs = []
+    for name, source, kind in _find_runs(Path(source_dir)):
+        final = dest_dir / f"{name}.parquet"
+        outputs.append(final)
+        if final.exists() and not overwrite:
+            progress(f"kept       {final.name} (exists; turn on overwrite to convert again)")
+            continue
 
-    work = dest_dir / f".cytotable_work_{raw.name}"
-    shutil.rmtree(work, ignore_errors=True)
-    work.mkdir()
-    _reset_parsl()
-    try:
-        if raw.kind == "sqlite":
-            produced = _convert_tables(raw.paths[0], "sqlite", _sqlite_stems(raw.paths[0]), work, chunk_size, max_threads)
-        elif raw.kind == "csv_tables":
-            stage = work / "stage"
-            stage.mkdir()
-            for logical in TABLE_ALIASES:
-                source = next(p for p in raw.paths if p.stem.lower() in TABLE_ALIASES[logical])
-                _stage(source, stage / f"{logical}.csv")
-            produced = _convert_tables(stage, "csv", {k: k for k in TABLE_ALIASES}, work, chunk_size, max_threads)
-        else:
-            produced = _convert_merged(raw.paths[0], work, chunk_size, max_threads)
-        os.replace(produced, final)
-    finally:
-        _reset_parsl()  # stop parsl first, so it cannot write into the scratch folder we delete next
+        progress(f"converting {source.name} ({kind}) -> {final.name}")
+        work = dest_dir / f".cytotable_work_{name}"  # temporary: CytoTable chunks and parsl logs
         shutil.rmtree(work, ignore_errors=True)
-    return ConversionResult(
-        final, "replaced" if existed else "converted", pq.ParquetFile(final).metadata.num_rows,
-        time.perf_counter() - started,
-    )
-
-
-def count_source_cells(raw: RawInput) -> int:
-    """Cells in the raw input before conversion: cytoplasm objects (SQLite, Per_* CSV) or rows (merged CSV).
-
-    The Parquet has one row per cell that has a cell, a nucleus and an image, so it can be smaller
-    than this number; the difference is the objects the join dropped.
-    """
-    if raw.kind == "sqlite":
-        table = _sqlite_table_names(raw.paths[0])["cytoplasm"]
-        with sqlite3.connect(f"file:{raw.paths[0]}?mode=ro", uri=True) as connection:
-            return int(connection.execute(f'SELECT COUNT(*) FROM "{table}"').fetchone()[0])
-    if raw.kind == "csv_tables":
-        source = next(p for p in raw.paths if p.stem.lower() in TABLE_ALIASES["cytoplasm"])
-    else:
-        source = raw.paths[0]
-    return int(sum(len(chunk) for chunk in pd.read_csv(source, usecols=[0], chunksize=500_000)))
-
-
-def is_stale(parquet: Path, sources: Sequence[Path]) -> bool:
-    """True when a raw file was modified after the Parquet file was written."""
-    written = Path(parquet).stat().st_mtime
-    return any(Path(s).stat().st_mtime > written for s in sources)
-
-
-# --------------------------------------------------------------------------- reading the result
-def inventory(paths: Sequence[Path]) -> pd.DataFrame:
-    """One row per Parquet file: cells (rows), columns and size in MB (from the file footer, no data read)."""
-    rows = []
-    for path in map(Path, paths):
-        meta = pq.ParquetFile(path).metadata
-        rows.append(
-            {
-                "file": path.name,
-                "cells": meta.num_rows,
-                "columns": meta.num_columns,
-                "size_mb": round(path.stat().st_size / 1e6, 2),
-            }
-        )
-    return pd.DataFrame(rows, columns=["file", "cells", "columns", "size_mb"])
+        _reset_parsl()
+        try:
+            result = cytotable.convert(
+                source_path=str(source),
+                dest_path=str(work / final.name),
+                dest_datatype="parquet",
+                source_datatype=kind,
+                preset=f"cellprofiler_{kind}",
+                joins=SQLITE_JOIN if kind == "sqlite" else _csv_join(source),
+                chunk_size=chunk_size,
+                # Threads instead of separate processes, so it also works on Windows. Parsl (the task
+                # runner CytoTable uses) writes its logs to the temporary folder, not to ./runinfo.
+                parsl_config=Config(
+                    executors=[ThreadPoolExecutor(max_threads=max_threads, label="cytotable")],
+                    run_dir=str(work / "parsl_run"),
+                ),
+            )
+            os.replace(result, final)
+        finally:
+            _reset_parsl()  # stop parsl before deleting the folder it writes to
+            shutil.rmtree(work, ignore_errors=True)
+        progress(f"wrote      {final.name}: {pq.ParquetFile(final).metadata.num_rows:,} cells")
+    return outputs
 
 
 def read_qc_columns(paths: Sequence[Path], prefixes: Sequence[str], exact: Sequence[str] = ()) -> pd.DataFrame:
-    """Read only the columns that start with one of ``prefixes`` or equal one of ``exact``.
+    """Read selected columns from one or more Parquet files into one table.
 
-    Files are stacked; a column missing from one file (another channel on another plate) is NaN there.
-    Parquet reads just the requested columns, so a table with thousands of features loads quickly.
+    Parquet stores each column separately, so reading 200 of 3,000 columns reads only those 200.
+
+    Parameters
+    ----------
+    paths : sequence of Path
+        Parquet files, for example the list returned by :func:`convert_to_parquet`.
+    prefixes : sequence of str
+        Read every column whose name starts with one of these, for example ``"Image_ImageQuality_"``.
+    exact : sequence of str, default ()
+        Read these columns as well. A name that no file has is skipped.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The rows of all files, one below the other. If a column is missing from one file (for
+        example a Hoechst channel that only plate B has), its values are NaN for that file's rows.
+        The table is empty if ``paths`` is empty.
     """
-    prefixes, exact = tuple(prefixes), set(exact)
+    starts, names = tuple(prefixes), set(exact)
     frames = []
     for path in map(Path, paths):
-        names = pq.read_schema(path).names
-        wanted = [c for c in names if c.startswith(prefixes) or c in exact]
+        wanted = [c for c in pq.read_schema(path).names if c.startswith(starts) or c in names]
         frames.append(pq.read_table(path, columns=wanted).to_pandas())
     return pd.concat(frames, ignore_index=True, sort=False) if frames else pd.DataFrame()
+
+
+# --------------------------------------------------------------------------- helpers
+def _find_runs(source_dir: Path) -> list[tuple[str, Path, str]]:
+    """Find the CellProfiler runs in a folder and its subfolders.
+
+    Parameters
+    ----------
+    source_dir : Path
+        Folder with the raw CellProfiler output.
+
+    Returns
+    -------
+    list of tuple (str, Path, str)
+        For each run: the output name, the source (a ``.sqlite`` file or a CSV folder) and the
+        kind, ``"sqlite"`` or ``"csv"``. The list is empty if the folder does not exist or holds
+        no CellProfiler output.
+
+    Raises
+    ------
+    ValueError
+        If a CSV folder misses one of the four tables, if one CSV run folder lies inside another
+        (CytoTable reads subfolders too, so the two runs would be mixed), or if there are ``.db``
+        files but no ``.sqlite`` file (CytoTable reads SQLite only with the ``.sqlite`` extension).
+    """
+    if not source_dir.is_dir():
+        return []
+
+    def name(path: Path) -> str:
+        parts = path.relative_to(source_dir).parts
+        if path.is_file():
+            parts = (*parts[:-1], path.stem)
+        return "_".join(parts) or source_dir.name
+
+    databases = sorted(source_dir.rglob("*.sqlite"))
+    if databases:
+        return [(name(p), p, "sqlite") for p in databases]
+    if any(source_dir.rglob("*.db")):
+        raise ValueError(
+            f"CytoTable reads SQLite files only with the .sqlite extension. Rename the .db files in {source_dir}."
+        )
+
+    folders = sorted({p.parent for p in source_dir.rglob("*.csv") if p.stem.lower() == "image"})
+    for folder in folders:
+        found = {p.stem.lower() for p in folder.glob("*.csv")}
+        missing = [f"{t.capitalize()}.csv" for t in CSV_TABLES if t not in found]
+        if missing:
+            raise ValueError(f"{folder} has Image.csv but no {', '.join(missing)} (CellProfiler ExportToSpreadsheet).")
+        if any(other != folder and folder in other.parents for other in folders):
+            raise ValueError(f"{folder} holds a CellProfiler run and another run in a subfolder. Give each run its own folder.")
+    return [(name(f), f, "csv") for f in folders]
+
+
+def _csv_join(folder: Path) -> str:
+    """Build the join query for one CSV run.
+
+    Parameters
+    ----------
+    folder : Path
+        The run's folder with Image.csv, Cells.csv, Cytoplasm.csv and Nuclei.csv.
+
+    Returns
+    -------
+    str
+        ``CSV_JOIN`` with the image query filled in. The query renames ``ImageQuality_*`` columns
+        only if Image.csv has them, because DuckDB stops with an error when the rename finds no
+        column (for example, in a pipeline without the MeasureImageQuality module).
+    """
+    image_csv = next(p for p in folder.glob("*.csv") if p.stem.lower() == "image")
+    has_quality = any(c.startswith("ImageQuality_") for c in pd.read_csv(image_csv, nrows=0).columns)
+    return CSV_JOIN.format(image_columns=CSV_IMAGE_COLUMNS + (CSV_IMAGE_QUALITY if has_quality else ""))
+
+
+def _reset_parsl() -> None:
+    """Stop any parsl session left from an earlier conversion.
+
+    Parsl is the task runner that CytoTable uses. After a failed conversion it keeps its session
+    open, and the next conversion in the same notebook session stops with an error. This function
+    closes that session. It does nothing if no session is open.
+    """
+    import parsl
+
+    for step in (lambda: parsl.dfk().cleanup(), parsl.clear):
+        try:
+            step()
+        except Exception:  # no session is open: nothing to close
+            pass

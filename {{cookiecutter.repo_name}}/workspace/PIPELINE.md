@@ -33,7 +33,7 @@ of those notebooks as a substitute for actually reviewing them.
 
 | Step | Notebook | Input | Output | What it does |
 |------|----------|-------|--------|-------------|
-| 0 | `00_convert_to_parquet.py` | CellProfiler SQLite / `Per_*` CSVs / one merged CSV in `backend/{EXPERIMENT_ID}/` | `outputs/parquet/*.parquet` (one row per cell), `results/parquet_conversion/*.csv` | Convert with CytoTable; checks that data QC will find its columns and that cells are unique — see [Convert to Parquet](#convert-to-parquet-nb00) |
+| 0 | `00_convert_to_parquet.py` | CellProfiler SQLite (ExportToDatabase) or CSVs (ExportToSpreadsheet) in `backend/{EXPERIMENT_ID}/` | `outputs/parquet/*.parquet` (one row per cell), `results/parquet_conversion/provenance_nb00_latest.json` | Convert with CytoTable (one call to `convert_to_parquet`) — see [Convert to Parquet](#convert-to-parquet-nb00) |
 | 1 | `01_data_qc.py` | `outputs/parquet/*.parquet` (from `00_convert_to_parquet.py`); optional raw images | `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet`, `site_qc.csv`, `cell_qc.parquet`, DNA-content tables, `figures/data_qc/*.pdf`, `*.png` | Flags only: image QC (blur, saturation per site and channel), single-cell QC with coSMicQC, DNA-content (G1/G2) check; montages and cell crops for review — see [Data QC (NB00)](#data-qc-nb00) |
 | 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional NB00 `site_qc.csv` and `cell_qc.parquet` (and the image-quality extra's `excluded_sites.csv`) | `single_cell_profiles_qc.parquet` (+ `Metadata_image_qc`, `Metadata_profile_qc`) | Read/consolidate all discovered plates, label every cell pass/fail from NB00 (and the image-quality extra) and remove the failing cells (checkboxes), select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
 | 2 of 6 | `02_aggregate_normalize_featureselect.py` | `single_cell_profiles_qc.parquet` | `per_well_features_selected.parquet` | Filter to NB01's selected plate scope, annotate with platemap, aggregate to well-level, mad_robustize normalization, feature selection (SC-06→SC-10) |
@@ -92,33 +92,36 @@ Go/No-Go decision based on:
 
 ## Convert to Parquet (NB00)
 
-`00_convert_to_parquet.py` converts the raw CellProfiler output in `backend/{EXPERIMENT_ID}/` to Parquet
-with [CytoTable](https://github.com/cytomining/CytoTable). It changes no raw file and no column name.
+`00_convert_to_parquet.py` converts raw CellProfiler output in `backend/{EXPERIMENT_ID}/` to Parquet with
+[CytoTable](https://github.com/cytomining/CytoTable)'s CellProfiler presets. It changes no raw file.
 Later notebooks read only the columns they need, which is fast even for thousands of features.
 
-| `backend/{EXPERIMENT_ID}/` holds | Output in `analysis/{EXPERIMENT_ID}/outputs/parquet/` |
-|---|---|
-| SQLite database(s), one per plate | one file per database, named after it |
-| `Per_Image.csv`, `Per_Cells.csv`, `Per_Cytoplasm.csv`, `Per_Nuclei.csv` | one file named after the experiment |
-| one merged single-cell CSV (needs a numeric `ImageNumber` column) | one file named after the CSV |
+| CellProfiler module | Files in `backend/{EXPERIMENT_ID}/` (subfolders searched) | Preset | Output in `outputs/parquet/` |
+|---|---|---|---|
+| ExportToDatabase | `<name>.sqlite` with `Per_Image`, `Per_Cells`, `Per_Cytoplasm`, `Per_Nuclei` | `cellprofiler_sqlite` | `<name>.parquet` |
+| ExportToSpreadsheet | a folder with `Image.csv`, `Cells.csv`, `Cytoplasm.csv`, `Nuclei.csv` | `cellprofiler_csv` | `<folder>.parquet` |
 
-Any other mix of CSV files is refused. A file that already exists is kept unless **Overwrite existing
-outputs** is on; the notebook warns when the raw file is newer.
+Each SQLite file or CSV folder is one CellProfiler run and becomes one Parquet file; runs are converted
+separately because `ImageNumber` restarts in every run. If there are SQLite files, CSV files are not used.
+A `.db` file must be renamed to `.sqlite` (CytoTable reads only that extension). A file that already
+exists is kept unless **Overwrite existing outputs** is on.
 
-- **Join rule:** the same as `hca_pipeline.io`: a cell is kept when its cytoplasm object has a parent
-  cell, a parent nucleus and an image. The notebook reports how many objects the join dropped.
-- **Image columns:** all of them are kept (`Image_ImageQuality_*`, `Image_PathName_*`, ...).
-  CytoTable's built-in CellProfiler join drops all but `Image_FileName_*`, and data QC needs the rest.
-- **Checks (section 4):** plate, well and site present; **every cell unique** by plate, well, site, image
-  and object (two plates with one `Metadata_Plate` value collide here, and QC flags would land on the wrong
-  cells); DNA channel and coSMicQC features present; ImageQuality columns present (WARN: data QC falls
-  back to raw images). FAIL means data QC will stop.
-- **Tested:** `tests/test_cytotable_convert.py` checks that the Parquet equals what the pandas readers
-  give, for SQLite, `Per_*` CSVs and a merged CSV, including small chunks.
+The notebook makes one call, `convert_to_parquet(DB_ROOT, PARQUET_DIR, overwrite=...)` from
+`hca_pipeline.cytotable_convert`, which holds the only `cytotable.convert` call.
+
+- **Join:** the presets are used as they are except for the join. The preset joins keep only the image file
+  names (and, for SQLite, well and plate), so they drop plate/well/site, `Image_ImageQuality_*` and
+  `Image_PathName_*`, which data QC needs. The replacement joins keep every image column, with the presets'
+  rule: a cell is kept when its cytoplasm object has a parent cell, a parent nucleus and an image.
+- **Column names** are CytoTable's. For CSV input, `ImageQuality_*` is renamed to `Image_ImageQuality_*`
+  (CytoTable does not prefix columns that already start with "Image"), so both presets give the names
+  data QC reads.
+- **Tested:** `tests/test_cytotable_convert.py`: the SQLite output equals the pandas reader; the CSV output
+  of the same run has the same cells and values; plates in separate folders stay separate; small chunks
+  neither drop nor duplicate cells.
 - **Environment:** CytoTable 1.x needs DuckDB below 2 (`pixi.toml` pins `duckdb<2`).
 
-**Outputs:** `outputs/parquet/<name>.parquet`; `results/parquet_conversion/conversion_summary.csv`,
-`input_checks.csv`, `provenance_nb00_latest.json`.
+**Outputs:** `outputs/parquet/<name>.parquet`; `results/parquet_conversion/provenance_nb00_latest.json`.
 
 ## Data QC (NB01)
 
@@ -451,7 +454,7 @@ recur across different students' submissions in different amounts; run
 │   │   ├── outputs/                   # NB01 output (single_cell_profiles_qc.parquet)
 │   │   │   └── parquet/               # NB00: raw CellProfiler output as Parquet (read by data QC)
 │   │   ├── results/
-│   │   │   ├── parquet_conversion/    # NB00 (conversion summary, input checks)
+│   │   │   ├── parquet_conversion/    # NB00 (provenance)
 │   │   │   ├── data_qc/               # NB00 (exclusion lists read by NB01)
 │   │   │   ├── image_quality/         # optional image-quality extra
 │   │   │   ├── cv_summary.csv         # NB02
