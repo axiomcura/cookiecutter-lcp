@@ -22,7 +22,7 @@ def _(mo):
     # 02 — Annotate · Clean · Aggregate · Normalize · FeatureSelect
 
     **Pipeline step:** 2 of 6
-    **Input:** `single_cell_profiles.parquet` (from NB01; CSV supported as fallback)
+    **Input:** `single_cell_profiles_qc.parquet` (from NB01; CSV supported as fallback)
     **Output:** `per_well_features_selected.parquet` — per-well median profiles,
     normalized and feature-selected
 
@@ -370,8 +370,8 @@ def _(EXPERIMENT_ID, REPO_ROOT, mo, print):
 
     BARCODE_PLATEMAP_CSV = METADATA_DIR / "barcode_platemap.csv"
     PLATEMAP_DIR = METADATA_DIR / "platemap"
-    INPUT_CSV = ANALYSIS_OUT_DIR / "single_cell_profiles.csv"
-    INPUT_PARQUET = ANALYSIS_OUT_DIR / "single_cell_profiles.parquet"
+    INPUT_CSV = ANALYSIS_OUT_DIR / "single_cell_profiles_qc.csv"
+    INPUT_PARQUET = ANALYSIS_OUT_DIR / "single_cell_profiles_qc.parquet"
 
     SC_ANNOTATED_PARQUET = CACHE_DIR / "single_cell_annotated.parquet"
     SC_READY_PARQUET = PROFILES_OUT_DIR / "single_cell_ready.parquet"

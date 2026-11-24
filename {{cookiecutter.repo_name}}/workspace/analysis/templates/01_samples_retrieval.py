@@ -33,8 +33,9 @@ def _(mo):
 
     **Accepted raw inputs:** CellProfiler SQLite database(s), CellProfiler
     table CSVs, or one legacy merged single-cell CSV
-    **Primary output:** `single_cell_profiles.parquet`
-    **Interoperability output:** `single_cell_profiles.csv`
+    **Primary output:** `single_cell_profiles_qc.parquet`, with the QC labels
+    `Metadata_image_qc` and `Metadata_profile_qc` (`pass` / `fail` / `not assessed`)
+    **Interoperability output:** `single_cell_profiles_qc.csv`
     **QC outputs:** cell-count table, plate maps, feature-integrity report
     **Provenance output:** `provenance_nb01_latest.json`
 
@@ -358,8 +359,8 @@ def _(EXPERIMENT_ID, REPO_ROOT, mo):
     RESULTS_DIR = ANALYSIS_DIR / "results"
     FIGS_DIR = ANALYSIS_DIR / "figures" / "sample_retrieval"
 
-    OUTPUT_CSV = OUTPUT_DIR / "single_cell_profiles.csv"
-    OUTPUT_PARQUET = OUTPUT_DIR / "single_cell_profiles.parquet"
+    OUTPUT_CSV = OUTPUT_DIR / "single_cell_profiles_qc.csv"
+    OUTPUT_PARQUET = OUTPUT_DIR / "single_cell_profiles_qc.parquet"
     COUNTS_CSV = OUTPUT_DIR / "object_count_per_well.csv"
 
     for _directory in (OUTPUT_DIR, RESULTS_DIR, FIGS_DIR):
@@ -602,15 +603,33 @@ def _(mo):
     single-cell table; `plate_dfs` provides one validated DataFrame per
     plate for plate-level QC.
 
-    If `extras/image_quality.py` has been run for this experiment, its
-    `results/image_quality/excluded_sites.csv` (Plate/Well/Site combinations
-    that failed a blur/saturation/SNR threshold) is applied here, before any
-    structural validation below — so debris/out-of-focus/mis-exposed fields
-    never reach NB02's aggregation. If that file doesn't exist (image QC
-    hasn't been run, or `image_root` isn't configured for this experiment),
-    this step is a no-op.
+    **Data-QC labels and exclusions** are applied here, before any structural
+    validation below, so bad fields and badly segmented cells never reach
+    NB02's aggregation. Every cell first gets two labels:
+
+    | Column | `fail` when | Source |
+    |---|---|---|
+    | `Metadata_image_qc` | its site is blurred or saturated | `results/data_qc/site_qc.csv` (NB00) and/or `results/image_quality/excluded_sites.csv` (`extras/image_quality.py`) |
+    | `Metadata_profile_qc` | coSMicQC flags the cell (segmentation error) | `results/data_qc/cell_qc.parquet` (NB00) |
+
+    Values are `pass`, `fail`, or `not assessed` (that QC was not run, or the
+    cell is missing from its table). The checkboxes below then remove the
+    `fail` cells. With a box off, the failing cells stay in
+    `single_cell_profiles_qc.parquet`, labelled `fail`, so you can filter later.
     """)
     return
+
+
+@app.cell
+def _(mo):
+    apply_site_qc_input = mo.ui.checkbox(
+        value=True, label="Remove cells with Metadata_image_qc = fail (blurred or saturated site)"
+    )
+    apply_cell_qc_input = mo.ui.checkbox(
+        value=True, label="Remove cells with Metadata_profile_qc = fail (coSMicQC segmentation error)"
+    )
+    mo.vstack([apply_site_qc_input, apply_cell_qc_input])
+    return apply_cell_qc_input, apply_site_qc_input
 
 
 @app.cell
@@ -618,6 +637,8 @@ def _(
     INPUT_KIND,
     INPUT_PATHS,
     RESULTS_DIR,
+    apply_cell_qc_input,
+    apply_site_qc_input,
     pd,
     prepare_single_cell_profiles,
     print,
@@ -651,66 +672,122 @@ def _(
         print("  The full traceback remains available by expanding this cell.")
         raise
 
-    _excluded_sites_csv = RESULTS_DIR / "image_quality" / "excluded_sites.csv"
-    if not _excluded_sites_csv.exists():
-        print("ℹ️  No image-quality exclusion list found — skipping (image QC not run for this experiment).")
+    from hca_pipeline.data_qc import lookup_qc_status
+
+    # ── Label every cell: Metadata_image_qc (site level) ──────────────────
+    _site_qc_path = RESULTS_DIR / "data_qc" / "site_qc.csv"
+    _extra_sites_path = RESULTS_DIR / "image_quality" / "excluded_sites.csv"
+    df_all["Metadata_image_qc"] = "not assessed"
+
+    def _read_sites(path):
+        # Match on a trailing-underscore-insensitive plate key: raw image
+        # folder names and this experiment's single-cell convention have been
+        # observed to disagree on a trailing "_" ("..._Plate_1" vs
+        # "..._Plate_1_") for the same plate. Metadata_Plate itself is untouched.
+        _table = pd.read_csv(path)
+        _table["_join_plate"] = _table["Metadata_Plate"].astype(str).str.strip().str.rstrip("_")
+        return _table
+
+    _site_sources = [_path for _path in (_site_qc_path, _extra_sites_path) if _path.exists()]
+    if not _site_sources:
+        print("ℹ️  No image-QC results found — Metadata_image_qc = 'not assessed' (NB00 / image-quality extra not run).")
     else:
-        _excluded = pd.read_csv(_excluded_sites_csv)
-        _excluded["Metadata_Plate"] = _excluded["Metadata_Plate"].astype("string").str.strip()
-        _excluded["Metadata_Well"] = _excluded["Metadata_Well"].astype("string").str.strip()
-
-        if "Metadata_Site" in df_all.columns and "Metadata_Site" in _excluded.columns:
-            # Match on a trailing-underscore-insensitive plate key: raw image
-            # folder names (what image-quality extra's image_qc.infer_plate reads) and this
-            # experiment's single-cell/platemap convention have been observed
-            # to disagree on a trailing "_" (e.g. "..._Plate_1" vs.
-            # "..._Plate_1_") even though they refer to the same plate. The
-            # canonical Metadata_Plate values in df_all are left untouched --
-            # this normalization is only used to build the join key.
-            _join_cols = ["_join_plate", "Metadata_Well", "Metadata_Site"]
-            _excluded["Metadata_Site"] = _excluded["Metadata_Site"].astype("string")
-            _excluded["_join_plate"] = _excluded["Metadata_Plate"].str.rstrip("_")
-            _excluded_keys = _excluded[_join_cols].drop_duplicates()
-
-            _df_all_keys = df_all[["Metadata_Plate", "Metadata_Well", "Metadata_Site"]].copy()
-            _df_all_keys["Metadata_Site"] = _df_all_keys["Metadata_Site"].astype("string")
-            _df_all_keys["_join_plate"] = _df_all_keys["Metadata_Plate"].str.rstrip("_")
-
-            _n_matched_keys = len(
-                _excluded_keys.merge(_df_all_keys[_join_cols].drop_duplicates(), on=_join_cols, how="inner")
-            )
+        print("Image-QC results: " + ", ".join(str(_path.relative_to(RESULTS_DIR)) for _path in _site_sources))
+        _failed_sites = pd.concat(
+            [
+                _table.loc[_table["Metadata_image_qc"].eq("fail")] if "Metadata_image_qc" in _table else _table
+                for _table in map(_read_sites, _site_sources)
+            ],
+            ignore_index=True,
+        )
+        if "Metadata_Site" not in df_all.columns:
+            # No per-site granularity in this experiment's single-cell table.
+            # Failing a whole well because one of several sites failed could
+            # discard good cells, so the label stays 'not assessed' and the
+            # failing wells are listed for manual review.
             print(
-                f"  Match check: {_n_matched_keys}/{len(_excluded_keys)} excluded plate/well/site "
-                "combinations found a matching entry in df_all. A low match count can mean "
-                "plate/well/site identifiers differ between the raw-image folder names and this "
-                "experiment's single-cell metadata, OR that a flagged site already contributes zero "
-                "cells to df_all (e.g. CellProfiler segmented nothing on a badly under/overexposed "
-                "field) — inspect the unmatched rows in excluded_sites.csv if this matters for your "
-                "dataset, don't assume it's a bug."
+                "⚠️  df_all has no Metadata_Site column, so site-level image QC can't be matched "
+                "to cells (Metadata_image_qc = 'not assessed'). Review these plate/well combinations "
+                "and exclude them manually if warranted:"
+            )
+            for _row in _failed_sites[["Metadata_Plate", "Metadata_Well"]].drop_duplicates().itertuples(index=False):
+                print(f"    - {_row.Metadata_Plate} / {_row.Metadata_Well}")
+        else:
+            _site_keys = ["_join_plate", "Metadata_Well", "Metadata_Site"]
+            _cells = df_all[["Metadata_Plate", "Metadata_Well", "Metadata_Site"]].copy()
+            _cells["_join_plate"] = _cells["Metadata_Plate"].astype(str).str.strip().str.rstrip("_")
+            # NB00's site table has a status for every site; the extra only lists
+            # failures (and checked every site), so unlisted sites pass.
+            _image_status = (
+                lookup_qc_status(_cells, _read_sites(_site_qc_path), _site_keys, "Metadata_image_qc")
+                if _site_qc_path.exists()
+                else pd.Series("pass", index=df_all.index)
+            )
+            if _extra_sites_path.exists():
+                _listed = lookup_qc_status(
+                    _cells, _read_sites(_extra_sites_path).assign(Metadata_image_qc="fail"),
+                    _site_keys, "Metadata_image_qc", missing="",
+                )
+                _image_status = _image_status.mask(_listed.eq("fail"), "fail")
+            df_all["Metadata_image_qc"] = _image_status.to_numpy()
+
+            _n_failed_listed = len(
+                _failed_sites[_site_keys].astype(str).replace(r"\.0$", "", regex=True).drop_duplicates()
+            )
+            _n_failed_found = len(_cells.loc[_image_status.eq("fail").to_numpy(), _site_keys].drop_duplicates())
+            print(
+                f"  {_n_failed_found} of {_n_failed_listed} failing site(s) have cells in df_all. A gap means a "
+                "failing site had no segmented cells, or plate/well/site names differ between the QC "
+                "table and the single-cell data — inspect the unmatched sites if this matters."
             )
 
-            _n_before = len(df_all)
-            _merged = _df_all_keys.merge(_excluded_keys, on=_join_cols, how="left", indicator=True)
-            df_all = df_all.loc[_merged["_merge"].to_numpy() == "left_only"].reset_index(drop=True)
-            _n_dropped = _n_before - len(df_all)
+    # ── Label every cell: Metadata_profile_qc (cell level, coSMicQC) ──────
+    _cell_qc_path = RESULTS_DIR / "data_qc" / "cell_qc.parquet"
+    df_all["Metadata_profile_qc"] = "not assessed"
+    if not _cell_qc_path.exists():
+        print("ℹ️  No NB00 cell-QC table found — Metadata_profile_qc = 'not assessed' (NB00 not run).")
+    else:
+        _cell_qc = pd.read_parquet(_cell_qc_path)
+        _cell_keys = [
+            _c for _c in ("Metadata_Plate", "Metadata_Well", "Metadata_Site", "ImageNumber", "Cells_Number_Object_Number")
+            if _c in _cell_qc.columns and _c in df_all.columns
+        ]
+        if "Cells_Number_Object_Number" not in _cell_keys:
             print(
-                f"✓ Applied image-QC exclusions (site-level): dropped {_n_dropped:,} of {_n_before:,} "
-                f"cells ({_n_matched_keys:,} of {len(_excluded_keys):,} flagged plate/well/site "
-                "combination(s) actually matched and were excluded)"
+                "⚠️  Metadata_profile_qc = 'not assessed': no shared Cells_Number_Object_Number column "
+                f"(shared keys: {_cell_keys}), so cells cannot be matched one by one."
             )
         else:
-            # No per-site granularity in this experiment's single-cell table.
-            # Dropping a whole well because one of several imaged sites
-            # failed QC could discard good cells too, so this case is
-            # surfaced for manual review instead of auto-excluded.
-            print(
-                "⚠️  df_all has no Metadata_Site column, so the site-level image-QC exclusion "
-                "list can't be safely applied automatically. Review the flagged plate/well "
-                "combinations below and exclude them manually if warranted:"
-            )
-            _flagged_wells = _excluded[["Metadata_Plate", "Metadata_Well"]].drop_duplicates()
-            for _row in _flagged_wells.itertuples(index=False):
-                print(f"    - {_row.Metadata_Plate} / {_row.Metadata_Well}")
+            df_all["Metadata_profile_qc"] = lookup_qc_status(
+                df_all, _cell_qc, _cell_keys, "Metadata_profile_qc"
+            ).to_numpy()
+            _n_missing = int(df_all["Metadata_profile_qc"].eq("not assessed").sum())
+            if _n_missing:
+                print(
+                    f"⚠️  {_n_missing:,} cells are not in NB00's cell_qc.parquet (matched on {_cell_keys}). "
+                    "NB00 and NB01 read different inputs — rerun NB00."
+                )
+
+    print("\nData-QC labels (cells):")
+    print(
+        pd.concat(
+            [df_all["Metadata_image_qc"].value_counts(), df_all["Metadata_profile_qc"].value_counts()], axis=1
+        ).fillna(0).astype(int).to_string()
+    )
+
+    # ── Remove failing cells (per checkbox) ───────────────────────────────
+    _n_before = len(df_all)
+    _remove = pd.Series(False, index=df_all.index)
+    if apply_site_qc_input.value:
+        _remove |= df_all["Metadata_image_qc"].eq("fail")
+    if apply_cell_qc_input.value:
+        _remove |= df_all["Metadata_profile_qc"].eq("fail")
+    df_all = df_all.loc[~_remove.to_numpy()].reset_index(drop=True)
+    print(
+        f"\n✓ Removed {_n_before - len(df_all):,} of {_n_before:,} cells "
+        f"(image-QC fails: {'removed' if apply_site_qc_input.value else 'kept, labelled'}; "
+        f"profile-QC fails: {'removed' if apply_cell_qc_input.value else 'kept, labelled'})"
+    )
     return (df_all,)
 
 
