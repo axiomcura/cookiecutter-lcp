@@ -16,6 +16,7 @@ packages = [
     "shap",
     "pycytominer",
     "copairs",
+    "cosmicqc",
     "marimo",
     "hdbscan",
     "harmonypy",
