@@ -2,7 +2,7 @@ CellProfiler Pipeline: http://www.cellprofiler.org
 Version:5
 DateRevision:425
 GitHash:
-ModuleCount:29
+ModuleCount:30
 HasImagePlaneDetails:False
 
 LoadData:[module_num:1|svn_version:'Unknown'|variable_revision_number:6|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
@@ -16,7 +16,26 @@ LoadData:[module_num:1|svn_version:'Unknown'|variable_revision_number:6|show_win
     Select metadata tags for grouping:Well,Site,Plate
     Rescale intensities?:Yes
 
-RunCellpose:[module_num:2|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MeasureImageQuality:[module_num:2|svn_version:'Unknown'|variable_revision_number:6|show_window:False|notes:['Image-quality metrics for NB00 (00_data_qc.py): blur (PowerLogLogSlope), saturation (PercentMaximal) and intensity (MaxIntensity) for every loaded channel. Runs before FlagImage so skipped image sets are still measured.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+    Calculate metrics for which images?:All loaded images
+    Image count:1
+    Scale count:1
+    Threshold count:1
+    Select the images to measure:
+    Include the image rescaling value?:Yes
+    Calculate blur metrics?:Yes
+    Spatial scale for blur measurements:20
+    Calculate saturation metrics?:Yes
+    Calculate intensity metrics?:Yes
+    Calculate thresholds?:No
+    Use all thresholding methods?:No
+    Select a thresholding method:Otsu
+    Typical fraction of the image covered by objects:0.1
+    Two-class or three-class thresholding?:Two classes
+    Minimize the weighted variance or the entropy?:Weighted variance
+    Assign pixels in the middle intensity class to the foreground or the background?:Foreground
+
+RunCellpose:[module_num:3|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:AOGFP
     Run CellPose in docker or local python environment:Python
     Select Cellpose docker image:cellprofiler/runcellpose_with_pretrained:0.1
@@ -41,7 +60,7 @@ RunCellpose:[module_num:2|svn_version:'Unknown'|variable_revision_number:4|show_
     Invert images:No
     Remove objects that are touching the edge?:Yes
 
-FlagImage:[module_num:3|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+FlagImage:[module_num:4|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Hidden:1
     Hidden:1
     Name the flag's category:Metadata
@@ -61,7 +80,7 @@ FlagImage:[module_num:3|svn_version:'Unknown'|variable_revision_number:5|show_wi
     Allow fuzzy feature matching?:No
     Ignore flag skips on last cycle?:No
 
-Smooth:[module_num:4|svn_version:'Unknown'|variable_revision_number:2|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+Smooth:[module_num:5|svn_version:'Unknown'|variable_revision_number:2|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:AOGFP
     Name the output image:FilteredGFP
     Select smoothing method:Gaussian Filter
@@ -70,7 +89,7 @@ Smooth:[module_num:4|svn_version:'Unknown'|variable_revision_number:2|show_windo
     Edge intensity difference:0.1
     Clip intensities to 0 and 1?:Yes
 
-IdentifySecondaryObjects:[module_num:5|svn_version:'Unknown'|variable_revision_number:10|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+IdentifySecondaryObjects:[module_num:6|svn_version:'Unknown'|variable_revision_number:10|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input objects:NucleiCP
     Name the objects to be identified:Cells
     Select the method to identify the secondary objects:Propagation
@@ -100,13 +119,13 @@ IdentifySecondaryObjects:[module_num:5|svn_version:'Unknown'|variable_revision_n
     # of deviations:2.0
     Thresholding method:Otsu
 
-IdentifyTertiaryObjects:[module_num:6|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+IdentifyTertiaryObjects:[module_num:7|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the larger identified objects:Cells
     Select the smaller identified objects:Nuclei
     Name the tertiary objects to be identified:Cytoplasm
     Shrink smaller object prior to subtraction?:Yes
 
-RescaleIntensity:[module_num:7|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+RescaleIntensity:[module_num:8|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:AOPI
     Name the output image:RescaleIntensityPI
     Rescaling method:Match the image's maximum to another image's maximum
@@ -120,7 +139,7 @@ RescaleIntensity:[module_num:7|svn_version:'Unknown'|variable_revision_number:3|
     Divisor value:1.0
     Divisor measurement:None
 
-ImageMath:[module_num:8|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+ImageMath:[module_num:9|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Operation:Add
     Raise the power of the result by:1.0
     Multiply the result by:1.0
@@ -139,7 +158,7 @@ ImageMath:[module_num:8|svn_version:'Unknown'|variable_revision_number:5|show_wi
     Multiply the second image by:1
     Measurement:
 
-EnhanceOrSuppressFeatures:[module_num:9|svn_version:'Unknown'|variable_revision_number:7|show_window:False|notes:['Enhance the speckles to facilitate identification in the next steps.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+EnhanceOrSuppressFeatures:[module_num:10|svn_version:'Unknown'|variable_revision_number:7|show_window:False|notes:['Enhance the speckles to facilitate identification in the next steps.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:ImageAfterMath2
     Name the output image:EnhanceJoin
     Select the operation:Enhance
@@ -153,7 +172,7 @@ EnhanceOrSuppressFeatures:[module_num:9|svn_version:'Unknown'|variable_revision_
     Speed and accuracy:Slow
     Rescale result image:No
 
-MaskImage:[module_num:10|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MaskImage:[module_num:11|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:EnhanceJoin
     Name the output image:MaskJoin
     Use objects or an image as a mask?:Objects
@@ -161,7 +180,7 @@ MaskImage:[module_num:10|svn_version:'Unknown'|variable_revision_number:3|show_w
     Select image for mask:None
     Invert the mask?:No
 
-Smooth:[module_num:11|svn_version:'Unknown'|variable_revision_number:2|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+Smooth:[module_num:12|svn_version:'Unknown'|variable_revision_number:2|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:MaskJoin
     Name the output image:FilteredImageJoin
     Select smoothing method:Gaussian Filter
@@ -170,7 +189,7 @@ Smooth:[module_num:11|svn_version:'Unknown'|variable_revision_number:2|show_wind
     Edge intensity difference:0.1
     Clip intensities to 0 and 1?:Yes
 
-IdentifyPrimaryObjects:[module_num:12|svn_version:'Unknown'|variable_revision_number:15|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+IdentifyPrimaryObjects:[module_num:13|svn_version:'Unknown'|variable_revision_number:15|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:FilteredImageJoin
     Name the primary objects to be identified:Nucleoli
     Typical diameter of objects, in pixel units (Min,Max):5,25
@@ -206,7 +225,7 @@ IdentifyPrimaryObjects:[module_num:12|svn_version:'Unknown'|variable_revision_nu
     # of deviations:2.0
     Thresholding method:Otsu
 
-EnhanceOrSuppressFeatures:[module_num:13|svn_version:'Unknown'|variable_revision_number:7|show_window:False|notes:['Enhance the speckles to facilitate identification in the next steps.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+EnhanceOrSuppressFeatures:[module_num:14|svn_version:'Unknown'|variable_revision_number:7|show_window:False|notes:['Enhance the speckles to facilitate identification in the next steps.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:AOPI
     Name the output image:EnhancePI
     Select the operation:Enhance
@@ -220,7 +239,7 @@ EnhanceOrSuppressFeatures:[module_num:13|svn_version:'Unknown'|variable_revision
     Speed and accuracy:Slow
     Rescale result image:No
 
-MaskImage:[module_num:14|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:['Mask image with the cytoplasm objects, then the resulted image will contain only speckles inside the cell.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MaskImage:[module_num:15|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:['Mask image with the cytoplasm objects, then the resulted image will contain only speckles inside the cell.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:EnhancePI
     Name the output image:MaskPI
     Use objects or an image as a mask?:Objects
@@ -228,7 +247,7 @@ MaskImage:[module_num:14|svn_version:'Unknown'|variable_revision_number:3|show_w
     Select image for mask:None
     Invert the mask?:No
 
-IdentifyPrimaryObjects:[module_num:15|svn_version:'Unknown'|variable_revision_number:15|show_window:False|notes:['Identify the vesicles.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+IdentifyPrimaryObjects:[module_num:16|svn_version:'Unknown'|variable_revision_number:15|show_window:False|notes:['Identify the vesicles.']|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the input image:MaskPI
     Name the primary objects to be identified:Vesicles
     Typical diameter of objects, in pixel units (Min,Max):1,15
@@ -264,7 +283,7 @@ IdentifyPrimaryObjects:[module_num:15|svn_version:'Unknown'|variable_revision_nu
     # of deviations:2.0
     Thresholding method:Otsu
 
-MeasureColocalization:[module_num:16|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:True]
+MeasureColocalization:[module_num:17|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:True]
     Select images to measure:AOGFP, AOPI
     Set threshold as percentage of maximum intensity for the images:15.0
     Select where to measure correlation:Within objects
@@ -277,7 +296,7 @@ MeasureColocalization:[module_num:16|svn_version:'Unknown'|variable_revision_num
     Calculate the Manders coefficients using Costes auto threshold?:Yes
     Method for Costes thresholding:Faster
 
-MeasureGranularity:[module_num:17|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MeasureGranularity:[module_num:18|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select images to measure:AOGFP, AOPI
     Measure within objects?:Yes
     Select objects to measure:Cells, Cytoplasm, Nuclei
@@ -286,7 +305,7 @@ MeasureGranularity:[module_num:17|svn_version:'Unknown'|variable_revision_number
     Radius of structuring element:3
     Range of the granular spectrum:10
 
-MeasureObjectIntensityDistribution:[module_num:18|svn_version:'Unknown'|variable_revision_number:6|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MeasureObjectIntensityDistribution:[module_num:19|svn_version:'Unknown'|variable_revision_number:6|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select images to measure:AOGFP, AOPI
     Hidden:1
     Hidden:1
@@ -300,16 +319,16 @@ MeasureObjectIntensityDistribution:[module_num:18|svn_version:'Unknown'|variable
     Number of bins:4
     Maximum radius:100
 
-MeasureObjectIntensity:[module_num:19|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MeasureObjectIntensity:[module_num:20|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select images to measure:AOGFP, AOPI
     Select objects to measure:Cells, Cytoplasm, Nuclei, Nucleoli, Vesicles
 
-MeasureObjectSizeShape:[module_num:20|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MeasureObjectSizeShape:[module_num:21|svn_version:'Unknown'|variable_revision_number:3|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select object sets to measure:Cells, Cytoplasm, Nuclei, Nucleoli, Vesicles
     Calculate the Zernike features?:Yes
     Calculate the advanced features?:Yes
 
-MeasureTexture:[module_num:21|svn_version:'Unknown'|variable_revision_number:7|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+MeasureTexture:[module_num:22|svn_version:'Unknown'|variable_revision_number:7|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select images to measure:AOGFP, AOPI
     Select objects to measure:Cells, Cytoplasm, Nuclei
     Enter how many gray levels to measure the texture at:256
@@ -319,7 +338,7 @@ MeasureTexture:[module_num:21|svn_version:'Unknown'|variable_revision_number:7|s
     Texture scale to measure:10
     Texture scale to measure:20
 
-RelateObjects:[module_num:22|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+RelateObjects:[module_num:23|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Parent objects:Cells
     Child objects:Vesicles
     Calculate child-parent distances?:None
@@ -329,7 +348,7 @@ RelateObjects:[module_num:22|svn_version:'Unknown'|variable_revision_number:5|sh
     Name the output object:RelateObjects
     Parent name:None
 
-RelateObjects:[module_num:23|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+RelateObjects:[module_num:24|svn_version:'Unknown'|variable_revision_number:5|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Parent objects:Nuclei
     Child objects:Nucleoli
     Calculate child-parent distances?:None
@@ -339,7 +358,7 @@ RelateObjects:[module_num:23|svn_version:'Unknown'|variable_revision_number:5|sh
     Name the output object:RelateObjects
     Parent name:None
 
-OverlayOutlines:[module_num:24|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+OverlayOutlines:[module_num:25|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Display outlines on a blank image?:Yes
     Select image on which to display outlines:CorrGFP
     Name the output image:NucleiOutlines
@@ -349,7 +368,7 @@ OverlayOutlines:[module_num:24|svn_version:'Unknown'|variable_revision_number:4|
     Select outline color:green
     Select objects to display:Nuclei
 
-OverlayOutlines:[module_num:25|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+OverlayOutlines:[module_num:26|svn_version:'Unknown'|variable_revision_number:4|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Display outlines on a blank image?:Yes
     Select image on which to display outlines:CorrGFP
     Name the output image:CellOutlines
@@ -361,7 +380,7 @@ OverlayOutlines:[module_num:25|svn_version:'Unknown'|variable_revision_number:4|
     Select outline color:Yellow
     Select objects to display:Cells
 
-SaveImages:[module_num:26|svn_version:'Unknown'|variable_revision_number:16|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:True]
+SaveImages:[module_num:27|svn_version:'Unknown'|variable_revision_number:16|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:True]
     Select the type of image to save:Image
     Select the image to save:NucleiOutlines
     Select method for constructing file names:Single name
@@ -381,7 +400,7 @@ SaveImages:[module_num:26|svn_version:'Unknown'|variable_revision_number:16|show
     How to save the series:T (Time)
     Save with lossless compression?:No
 
-SaveImages:[module_num:27|svn_version:'Unknown'|variable_revision_number:16|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+SaveImages:[module_num:28|svn_version:'Unknown'|variable_revision_number:16|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the type of image to save:Image
     Select the image to save:CellOutlines
     Select method for constructing file names:Single name
@@ -401,7 +420,7 @@ SaveImages:[module_num:27|svn_version:'Unknown'|variable_revision_number:16|show
     How to save the series:T (Time)
     Save with lossless compression?:No
 
-ExportToSpreadsheet:[module_num:28|svn_version:'Unknown'|variable_revision_number:13|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+ExportToSpreadsheet:[module_num:29|svn_version:'Unknown'|variable_revision_number:13|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Select the column delimiter:Comma (",")
     Add image metadata columns to your object data file?:No
     Add image file and folder names to your object data file?:No
@@ -453,7 +472,7 @@ ExportToSpreadsheet:[module_num:28|svn_version:'Unknown'|variable_revision_numbe
     File name:DATA.csv
     Use the object name for the file name?:Yes
 
-ExportToDatabase:[module_num:29|svn_version:'Unknown'|variable_revision_number:28|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
+ExportToDatabase:[module_num:30|svn_version:'Unknown'|variable_revision_number:28|show_window:False|notes:[]|batch_state:array([], dtype=uint8)|enabled:True|wants_pause:False]
     Database type:SQLite
     Database name:DefaultDB
     Add a prefix to table names?:No
