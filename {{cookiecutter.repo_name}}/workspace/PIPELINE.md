@@ -15,9 +15,9 @@ under each experiment's `analysis/legacy_ipynb/` for reference, not deleted.
 ## Pipeline Flow
 
 ```
-NB01 → NB02 → NB03 → NB04 → NB05 → NB06
-                ↑
-           Go/No-Go gate
+NB00 → NB01 → NB02 → NB03 → NB04 → NB05 → NB06
+                       ↑
+                  Go/No-Go gate
 
 Optional cell-count review:
 NB04 → extras/cell_count_confounder_qc.py → NB03 → NB04 → NB05 → NB06
@@ -33,8 +33,9 @@ of those notebooks as a substitute for actually reviewing them.
 
 | Step | Notebook | Input | Output | What it does |
 |------|----------|-------|--------|-------------|
-| 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional `excluded_sites.csv` (from image-quality extra) | `single_cell_profiles.parquet` | Read/consolidate all discovered plates, apply image-quality extra's image-QC exclusions if present, select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
-| 2 of 6 | `02_aggregate_normalize_featureselect.py` | `single_cell_profiles.parquet` | `per_well_features_selected.parquet` | Filter to NB01's selected plate scope, annotate with platemap, aggregate to well-level, mad_robustize normalization, feature selection (SC-06→SC-10) |
+| 0 of 6 | `00_data_qc.py` | CellProfiler SQLite / `Per_*` CSVs; optional raw images | `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet`, `site_qc.csv`, `cell_qc.parquet`, DNA-content tables, `figures/data_qc/*.png` | Flags only: image QC (blur, saturation per site and channel), single-cell QC with coSMicQC, DNA-content (G1/G2) check; montages and cell crops for review — see [Data QC (NB00)](#data-qc-nb00) |
+| 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional NB00 `site_qc.csv` and `cell_qc.parquet` (and the image-quality extra's `excluded_sites.csv`) | `single_cell_profiles_qc.parquet` (+ `Metadata_image_qc`, `Metadata_profile_qc`) | Read/consolidate all discovered plates, label every cell pass/fail from NB00 (and the image-quality extra) and remove the failing cells (checkboxes), select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
+| 2 of 6 | `02_aggregate_normalize_featureselect.py` | `single_cell_profiles_qc.parquet` | `per_well_features_selected.parquet` | Filter to NB01's selected plate scope, annotate with platemap, aggregate to well-level, mad_robustize normalization, feature selection (SC-06→SC-10) |
 | 3 of 6 | `03_quality_metrics.py` | `per_well_features_selected.parquet` | `results/quality_metrics/*.csv`, `figures/quality_metrics/*.png` | Percent Replicating, mAP, batch assessment, dose-response, Go/No-Go decision (SC-18→SC-22) — runs **before** biological interpretation, so profiling/fingerprints/single-cell analysis only happen on data that already cleared the replicate-signal bar |
 | 4 of 6 | `04_phenotypic_profiling.py` | `per_well_features_selected.parquet` | LDA/PCA/UMAP figures, models, CSVs | PCA, UMAP, LDA with leave-one-plate-out CV, Cohen's d, KMeans clustering, uncorrected-vs-Harmony comparison (SC-11→SC-13) |
 | 5 of 6 | `05_phenotypic_fingerprints.py` | `per_well_features_selected.parquet` | `results/phenotypic_fingerprints/*`, `figures/phenotypic_fingerprints/*` | Feature taxonomy, per-condition Cohen's d fingerprints, heatmaps/radar plots — dose-optional |
@@ -43,11 +44,13 @@ of those notebooks as a substitute for actually reviewing them.
 ### Project-specific extras
 
 These notebooks live under `analysis/extras/` and are copied separately from
-the general NB01–NB06 sequence:
+the general NB00–NB06 sequence:
 
 - `extras/image_quality.py` performs raw-image blur, saturation, SNR and focus
-  QC when raw microscopy images are available. Run it before NB01 if the
-  project needs image-level exclusions; otherwise ignore it.
+  QC when raw microscopy images are available. NB00 now covers blur and
+  saturation (from CellProfiler `MeasureImageQuality`, or the same pixel
+  metrics as a fallback); use this extra only if you also need its SNR
+  thresholds. NB01 applies the exclusion lists of both.
 - `extras/cell_count_confounder_qc.py` is opened only when NB04 flags a
   plausible cell-count association. It diagnoses global and within-control
   associations and requires an explicit reviewed decision before producing an
@@ -57,7 +60,7 @@ the general NB01–NB06 sequence:
 - `extras/recovery_axis_analysis.py`
 computes a geometric "recovery axis" between two named reference states
 (e.g. a dormancy baseline and a proliferative/recovered state). It is **not**
-part of the required 01→06 sequence — it only applies to datasets built
+part of the required 00→06 sequence — it only applies to datasets built
 around that specific two-reference-state design, and gracefully skips itself
 if the two reference labels aren't configured. Do not treat it as a required
 step for datasets without that biology.
@@ -85,6 +88,63 @@ Go/No-Go decision based on:
 | PR (Percent Replicating) | What fraction of treatments replicate above null? | 0–1 | > 0.25 | Caicedo et al. 2020 [doi:10.1038/s41592-020-0851-3] |
 | PM (Percent Matching) | What fraction of profiles match same treatment? | 0–1 | > 0.50 | Caicedo et al. 2020 |
 | mAP (Mean Average Precision) | How well can we retrieve replicates from ranking? | 0–1 | > 0.50, FDR-significant | Kalinin et al. 2025 [doi:10.1038/s41467-025-60306-2] |
+
+## Data QC (NB00)
+
+`00_data_qc.py` runs on the raw CellProfiler output, before NB01. It
+**flags** problems and writes QC tables; NB01 labels every cell and removes the failures.
+Nothing in `backend/` is changed.
+
+| Check | Unit | Features | Rule (defaults) | Source |
+|---|---|---|---|---|
+| Blur | site × channel | `Image_ImageQuality_PowerLogLogSlope_<ch>` (fallback: `log10` Laplacian variance from raw pixels) | robust z (per plate) < −5 | Panc1-hPSC pilot QC |
+| Saturation | site × channel | `Image_ImageQuality_PercentMaximal_<ch>`, `Image_ImageQuality_MaxIntensity_<ch>` | > 1 % of pixels at the ceiling (MaxIntensity ≥ 0.99) | Panc1-hPSC pilot QC |
+| `under_segmented_nuclei` | cell | `Nuclei_Intensity_MassDisplacement_<DNA>`, `Nuclei_Intensity_IntegratedIntensity_<DNA>` | z > +0.05 **and** z > +1.5 | coSMicQC paper / Panc1 |
+| `poorly_segmented_nuclei` | cell | `Nuclei_AreaShape_Solidity` | z < −1.6 | coSMicQC paper / Panc1 |
+| `under_segmented_cells` | cell | `Cells_Intensity_IntegratedIntensity_<DNA>` | z > +0.5 | coSMicQC paper / Panc1 |
+| DNA content | plate, well, cell | `Nuclei_Intensity_IntegratedIntensity_<DNA>` | G2/M peak at 1.6–2.5× G1; descriptive only | Panc1-hPSC pilot QC |
+
+- **coSMicQC z-scores are per plate** (`cosmicqc.analyze.label_outliers` is
+  called once per plate, on cells with finite QC features).
+- **`<DNA>` channel:** Hoechst if the experiment has it, else `AOGFP`.
+  Acridine orange green also stains RNA, so with `AOGFP` the DNA-content
+  check is a proxy; NB00 says so in its output.
+- **Known trade-off:** `under_segmented_cells` (+0.5 SD of cell DNA) also
+  flags healthy G2/M cells. NB00 reports the flag rate per DNA-content group
+  and warns above 25 %. Turn the condition off under *Advanced settings* if
+  the crops show normal dividing cells.
+- **Treatment check:** NB00 compares fail rates of each treatment with the
+  negative controls on the same plate. A treatment with ≥ 2× the control rate
+  may have a real phenotype that coSMicQC reads as an error.
+
+**CellProfiler requirement.** The image-QC features come from the
+`MeasureImageQuality` module (module 2 of `pipelines/templates/analysis.cppipe`:
+blur, saturation and intensity for all loaded images, before `FlagImage`).
+Experiments processed with an older copy of the pipeline lack these columns.
+NB00 then falls back to raw-pixel metrics if the raw image folder is set, or
+skips image QC with a warning.
+
+**Outputs** (`analysis/{EXPERIMENT_ID}/results/data_qc/`):
+
+| File | Rows | Read by |
+|---|---|---|
+| `excluded_sites.csv` | sites failing image QC (Plate/Well/Site + reason) | NB01 |
+| `excluded_cells.parquet` | cells failing profile QC (Plate/Well/Site/ImageNumber/Cells object number + reason) | NB01 (checkbox, on by default) |
+| `site_qc.csv`, `cell_qc.parquet` | every site / cell with all flags | review |
+| `dna_content_peaks.csv`, `dna_content_per_well.csv` | G1/G2 peaks per plate; cell-cycle fractions per well | review |
+| `provenance_nb00_latest.json` | schema-v2 provenance | audit |
+
+**QC labels on every cell.** NB01 adds two columns to `single_cell_profiles_qc.parquet`
+(and the CSV copy). Both are `pass`, `fail` or `not assessed` (that QC was not run):
+
+| Column | `fail` when | Set from |
+|---|---|---|
+| `Metadata_image_qc` | the cell's site is blurred or saturated in any channel | `site_qc.csv` (and `image_quality/excluded_sites.csv`, if present) |
+| `Metadata_profile_qc` | coSMicQC flags the cell (under- or poorly segmented) | `cell_qc.parquet` |
+
+NB01 has one checkbox per label (both on by default) that removes the `fail` cells. With a box
+off, those cells stay in the table, labelled `fail`. A reason column is in the NB00 tables
+(`Metadata_image_qc_reason`, `Metadata_profile_qc_reason`).
 
 ## Marimo Notebooks
 
@@ -320,7 +380,7 @@ silently re-labels the repeats as `Metadata_Plate.1`, `Metadata_Plate.2`,
 ... on read to keep column names unique, and without cleanup they ride
 along into every downstream file. `hca_pipeline.metadata.dedupe_meta` is
 called right after NB01 reads a raw single-cell CSV, before anything is
-saved, so this never reaches `single_cell_profiles.parquet` in the first
+saved, so this never reaches `single_cell_profiles_qc.parquet` in the first
 place — the fix belongs at the point of ingestion, not scattered across
 every consumer. Since this is a property of the *raw data a student
 provides* (not something this pipeline's own code introduces), expect it to
@@ -343,14 +403,15 @@ recur across different students' submissions in different amounts; run
 │   ├── images/{EXPERIMENT_ID}/        # raw microscopy images (image-quality extra input, if configured)
 │   ├── analysis/{EXPERIMENT_ID}/
 │   │   ├── analysis/                  # the marimo notebooks themselves
-│   │   │   ├── 01_...py → 06_...py   # general pipeline
+│   │   │   ├── 00_...py → 06_...py   # general pipeline (00 = data QC)
 │   │   │   ├── extras/                # project-specific optional notebooks
 │   │   │   │   ├── image_quality.py
 │   │   │   │   ├── cell_count_confounder_qc.py
 │   │   │   │   └── recovery_axis_analysis.py
 │   │   │   └── legacy_ipynb/          # superseded Jupyter versions, kept for reference
-│   │   ├── outputs/                   # NB01 output (single_cell_profiles.parquet)
+│   │   ├── outputs/                   # NB01 output (single_cell_profiles_qc.parquet)
 │   │   ├── results/
+│   │   │   ├── data_qc/               # NB00 (exclusion lists read by NB01)
 │   │   │   ├── image_quality/         # optional image-quality extra
 │   │   │   ├── cv_summary.csv         # NB02
 │   │   │   ├── quality_metrics/       # NB03
@@ -358,6 +419,7 @@ recur across different students' submissions in different amounts; run
 │   │   │   ├── phenotypic_fingerprints/ # NB05
 │   │   │   └── recovery_axis/         # optional recovery-axis extra
 │   │   ├── figures/
+│   │   │   ├── data_qc/               # NB00
 │   │   │   ├── image_quality/         # optional image-quality extra
 │   │   │   ├── sample_retrieval/      # NB01
 │   │   │   ├── aggregation/           # NB02
@@ -436,7 +498,7 @@ All dependencies are pinned in `pixi.toml`:
 
 ```toml
 [dependencies]
-python = ">=3.10,<3.13"
+python = ">=3.11,<3.13"
 ipykernel = ">=6.0"
 pandas = ">=2.0"
 numpy = ">=1.24"

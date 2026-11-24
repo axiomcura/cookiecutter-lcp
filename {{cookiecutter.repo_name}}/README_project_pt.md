@@ -76,14 +76,16 @@ Antes de abrir os notebooks, crie a estrutura e copie os templates com:
 pixi run new-experiment 2026_08_Huh7_NPPS_500_1000nm_5_days
 ```
 
-O comando copia o pipeline geral NB01–NB06 para
+O comando copia o pipeline geral NB00–NB06 para
 `workspace/analysis/<EXPERIMENT_ID>/analysis/`, copia separadamente os
 notebooks específicos para `analysis/extras/` e cria as pastas de backend,
 metadados, outputs, resultados, figuras e relatórios. Ele não sobrescreve uma
 pasta de análise existente. Em seguida, coloque os outputs do CellProfiler em
-`workspace/backend/<EXPERIMENT_ID>/` e abra o NB01:
+`workspace/backend/<EXPERIMENT_ID>/` e abra o NB00 (controle de qualidade de
+imagens e células) e depois o NB01:
 
 ```bash
+pixi run marimo edit workspace/analysis/<EXPERIMENT_ID>/analysis/00_data_qc.py
 pixi run marimo edit workspace/analysis/<EXPERIMENT_ID>/analysis/01_samples_retrieval.py
 ```
 
