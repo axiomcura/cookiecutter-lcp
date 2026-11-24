@@ -609,8 +609,8 @@ def _(mo):
 
     | Column | `fail` when | Source |
     |---|---|---|
-    | `Metadata_image_qc` | its site is blurred or saturated | `results/data_qc/site_qc.csv` (NB00) and/or `results/image_quality/excluded_sites.csv` (`extras/image_quality.py`) |
-    | `Metadata_profile_qc` | coSMicQC flags the cell (segmentation error) | `results/data_qc/cell_qc.parquet` (NB00) |
+    | `Metadata_image_qc` | its site is blurred or saturated | `results/data_qc/site_qc.csv` (NB01, data QC) and/or `results/image_quality/excluded_sites.csv` (`extras/image_quality.py`) |
+    | `Metadata_profile_qc` | coSMicQC flags the cell (segmentation error) | `results/data_qc/cell_qc.parquet` (NB01, data QC) |
 
     Values are `pass`, `fail`, or `not assessed` (that QC was not run, or the
     cell is missing from its table). The checkboxes below then remove the
@@ -690,7 +690,7 @@ def _(
 
     _site_sources = [_path for _path in (_site_qc_path, _extra_sites_path) if _path.exists()]
     if not _site_sources:
-        print("ℹ️  No image-QC results found — Metadata_image_qc = 'not assessed' (NB00 / image-quality extra not run).")
+        print("ℹ️  No image-QC results found — Metadata_image_qc = 'not assessed' (NB01 data QC / image-quality extra not run).")
     else:
         print("Image-QC results: " + ", ".join(str(_path.relative_to(RESULTS_DIR)) for _path in _site_sources))
         _failed_sites = pd.concat(
@@ -716,7 +716,7 @@ def _(
             _site_keys = ["_join_plate", "Metadata_Well", "Metadata_Site"]
             _cells = df_all[["Metadata_Plate", "Metadata_Well", "Metadata_Site"]].copy()
             _cells["_join_plate"] = _cells["Metadata_Plate"].astype(str).str.strip().str.rstrip("_")
-            # NB00's site table has a status for every site; the extra only lists
+            # NB01's (data QC) site table has a status for every site; the extra only lists
             # failures (and checked every site), so unlisted sites pass.
             _image_status = (
                 lookup_qc_status(_cells, _read_sites(_site_qc_path), _site_keys, "Metadata_image_qc")
@@ -745,7 +745,7 @@ def _(
     _cell_qc_path = RESULTS_DIR / "data_qc" / "cell_qc.parquet"
     df_all["Metadata_profile_qc"] = "not assessed"
     if not _cell_qc_path.exists():
-        print("ℹ️  No NB00 cell-QC table found — Metadata_profile_qc = 'not assessed' (NB00 not run).")
+        print("ℹ️  No NB01 (data QC) cell-QC table found — Metadata_profile_qc = 'not assessed' (NB01 not run).")
     else:
         _cell_qc = pd.read_parquet(_cell_qc_path)
         _cell_keys = [
@@ -764,8 +764,8 @@ def _(
             _n_missing = int(df_all["Metadata_profile_qc"].eq("not assessed").sum())
             if _n_missing:
                 print(
-                    f"⚠️  {_n_missing:,} cells are not in NB00's cell_qc.parquet (matched on {_cell_keys}). "
-                    "NB00 and NB01 read different inputs — rerun NB00."
+                    f"⚠️  {_n_missing:,} cells are not in NB01's (data QC) cell_qc.parquet (matched on {_cell_keys}). "
+                    "Data QC (NB01) and this notebook read different inputs — rerun NB01."
                 )
 
     print("\nData-QC labels (cells):")

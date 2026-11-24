@@ -1,0 +1,374 @@
+{
+  "version": "1",
+  "metadata": {
+    "marimo_version": "0.25.2",
+    "script_metadata_hash": null
+  },
+  "cells": [
+    {
+      "id": "Hbol",
+      "code_hash": "1ae42b47007a648b0366c647575a8d5b",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "MJUe",
+      "code_hash": "b307016d5d18c6632f424d609c1992d6",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h1 id=\"00-convert-cellprofiler-output-to-parquet-cytotable\">00 \u2014 Convert CellProfiler output to Parquet (CytoTable)</h1>\n<span class=\"paragraph\"><strong>Pipeline step:</strong> 0 (first step)\n<strong>Position in pipeline:</strong> CellProfiler output \u2192 <strong>NB00 (convert to Parquet)</strong> \u2192 NB01 (data QC)\n<strong>Purpose:</strong> turn the raw CellProfiler output into one Parquet file per plate (or per\ninput) with one row per cell, using <a href=\"https://github.com/cytomining/CytoTable\" rel=\"noopener noreferrer\" target=\"_blank\">CytoTable</a>.</span>\n<blockquote>\n<span class=\"paragraph\">This notebook <strong>converts only</strong>. It never edits the raw files and does no QC,\nnormalisation or renaming of columns. Data QC is NB01.</span>\n</blockquote>\n<span class=\"paragraph\"><strong>Input:</strong> <code>workspace/backend/&lt;EXPERIMENT_ID&gt;/</code>, one of:</span>\n<table>\n<thead>\n<tr>\n<th>What is in the folder</th>\n<th>Output</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td>CellProfiler SQLite database(s), one per plate</td>\n<td>one Parquet per database, named after it</td>\n</tr>\n<tr>\n<td>The four tables <code>Per_Image.csv</code>, <code>Per_Cells.csv</code>, <code>Per_Cytoplasm.csv</code>, <code>Per_Nuclei.csv</code></td>\n<td>one Parquet, named after the experiment</td>\n</tr>\n<tr>\n<td><strong>One</strong> merged single-cell CSV</td>\n<td>one Parquet, named after the CSV</td>\n</tr>\n</tbody>\n</table>\n<span class=\"paragraph\"><strong>Outputs:</strong></span>\n<ul>\n<li><code>analysis/&lt;EXPERIMENT_ID&gt;/outputs/parquet/&lt;name&gt;.parquet</code> \u2014 read by NB01</li>\n<li><code>analysis/&lt;EXPERIMENT_ID&gt;/results/parquet_conversion/conversion_summary.csv</code>,\n  <code>input_checks.csv</code>, <code>provenance_nb00_latest.json</code></li>\n</ul>\n<h2 id=\"execution-logic\">Execution logic</h2>\n<ol>\n<li>Choose the experiment; set overwrite, threads and chunk size if needed.</li>\n<li>Find the raw input and list what will be converted.</li>\n<li>Convert with CytoTable (existing Parquet is kept unless overwrite is on).</li>\n<li>Check the Parquet files: what NB01 will find, and whether cells are unique.</li>\n<li>Write the summary tables and provenance; run integrity checks.</li>\n</ol></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "vblA",
+      "code_hash": "e6faa6766178938fac2b5f4f394df712",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"0-imports-and-shared-utilities\">0 \u2014 Imports and shared utilities</h2></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "bkHC",
+      "code_hash": "3884781777154ce78edb562a17e38301",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "lEQa",
+      "code_hash": "a1f855f55926a1609c01d5f101db02e3",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-callout-output data-html='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003e\u2705 Loaded &#92;u003ccode&#92;u003ehca_pipeline&#92;u003c/code&#92;u003e from &#92;u003ccode&#92;u003e/Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace&#92;u003c/code&#92;u003e.&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-kind='&quot;success&quot;'></marimo-callout-output>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "PKri",
+      "code_hash": "aa24294d7c270039858e82a70d101c11",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"1-experiment-configuration\">1 \u2014 Experiment configuration</h2>\n<span class=\"paragraph\">Pick the experiment folder under <code>workspace/backend/</code>. Overwrite, threads and\nchunk size are the only settings.</span>\n<ul>\n<li><strong>Overwrite:</strong> an existing Parquet file is kept unless this is on. If the raw file\n  is newer than the Parquet file, section 3 warns you to turn it on.</li>\n<li><strong>Threads, chunk size</strong> (under <em>Advanced</em>): CytoTable reads each table in chunks of\n  this many rows. The defaults suit most plates; raise the chunk size for very large\n  tables if memory allows.</li>\n</ul></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Xref",
+      "code_hash": "b6e310bff69ee43395079d0c9de362d0",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-ui-element object-id='Xref-0' random-id='3c694f09-3fd0-4ddb-a373-6d0e3c800eb3'><marimo-dropdown data-initial-value='[&quot;dormant-mps&quot;]' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eExperiment ID&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-options='[&quot;dormant-mps&quot;]' data-allow-select-none='false' data-searchable='false' data-full-width='false' data-disabled='false'></marimo-dropdown></marimo-ui-element>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "SFPL",
+      "code_hash": "8d3709f492b298c1a76b6a694ee68061",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/plain": ""
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "BYtC",
+      "code_hash": "f94f592eb17af46013fe709335db63d3",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><marimo-ui-element object-id='BYtC-0' random-id='cf37f953-006b-6109-dbd4-a74ed1db57b3'><marimo-checkbox data-initial-value='false' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eOverwrite existing outputs&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-disabled='false'></marimo-checkbox></marimo-ui-element><marimo-accordion data-labels='[&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eAdvanced settings: CytoTable performance (the defaults are fine for most plates)&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;]' data-multiple='false' data-expanded='[]'><div><div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><marimo-ui-element object-id='BYtC-1' random-id='52d2af8c-fc5d-a942-c3c3-2383088498a7'><marimo-number data-initial-value='4' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eCytoTable threads&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-start='1' data-stop='16' data-step='1' data-debounce='false' data-full-width='false' data-disabled='false'></marimo-number></marimo-ui-element><marimo-ui-element object-id='BYtC-2' random-id='ecebecd4-40ad-6128-3805-251737713cef'><marimo-number data-initial-value='10000' data-label='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003eRows per chunk (CytoTable)&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-start='1000' data-stop='1000000' data-step='1000' data-debounce='false' data-full-width='false' data-disabled='false'></marimo-number></marimo-ui-element></div></div></marimo-accordion></div>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "RGSE",
+      "code_hash": "7a579aca8fa72e69f25141eeee3aa6f2",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-callout-output data-html='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003ch3 id=&#92;&quot;effective-settings&#92;&quot;&#92;u003eEffective settings&#92;u003c/h3&#92;u003e&#92;n&#92;u003ctable&#92;u003e&#92;n&#92;u003cthead&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003cth&#92;u003eSetting&#92;u003c/th&#92;u003e&#92;n&#92;u003cth&#92;u003eValue&#92;u003c/th&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003c/thead&#92;u003e&#92;n&#92;u003ctbody&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003ctd&#92;u003eExperiment&#92;u003c/td&#92;u003e&#92;n&#92;u003ctd&#92;u003e&#92;u003ccode&#92;u003edormant-mps&#92;u003c/code&#92;u003e&#92;u003c/td&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003ctd&#92;u003eRaw CellProfiler input&#92;u003c/td&#92;u003e&#92;n&#92;u003ctd&#92;u003e&#92;u003ccode&#92;u003e/Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/backend/dormant-mps&#92;u003c/code&#92;u003e&#92;u003c/td&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003ctd&#92;u003eParquet output (read by NB01)&#92;u003c/td&#92;u003e&#92;n&#92;u003ctd&#92;u003e&#92;u003ccode&#92;u003e/Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/analysis/dormant-mps/outputs/parquet&#92;u003c/code&#92;u003e&#92;u003c/td&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003ctd&#92;u003eSummary tables&#92;u003c/td&#92;u003e&#92;n&#92;u003ctd&#92;u003e&#92;u003ccode&#92;u003e/Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/analysis/dormant-mps/results/parquet_conversion&#92;u003c/code&#92;u003e&#92;u003c/td&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003ctd&#92;u003eThreads \u00b7 rows per chunk&#92;u003c/td&#92;u003e&#92;n&#92;u003ctd&#92;u003e4 \u00b7 10,000&#92;u003c/td&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003ctr&#92;u003e&#92;n&#92;u003ctd&#92;u003eOverwrite existing outputs&#92;u003c/td&#92;u003e&#92;n&#92;u003ctd&#92;u003eFalse&#92;u003c/td&#92;u003e&#92;n&#92;u003c/tr&#92;u003e&#92;n&#92;u003c/tbody&#92;u003e&#92;n&#92;u003c/table&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-kind='&quot;info&quot;'></marimo-callout-output>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Kclp",
+      "code_hash": "ce78b1a22b8c5736372c9a9c0e917dd1",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"2-find-the-raw-input\">2 \u2014 Find the raw input</h2>\n<span class=\"paragraph\">SQLite databases win over CSV files. CSV files must be the four <code>Per_*</code> tables or\nexactly one merged CSV; any other mix is refused, because converting unrelated CSV\nfiles together would mix their columns. A merged CSV needs a numeric <code>ImageNumber</code>\ncolumn (CellProfiler writes it) so it can be read in chunks.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "emfo",
+      "code_hash": "a0d660a5828ab605ba585fac675fddba",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-ui-element object-id='emfo-0' random-id='7419d9d6-4afa-57b9-7d7c-5bf0192a34a0'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;input&#92;&quot;:&#92;&quot;Dormant_MPs_SingleCells&#92;&quot;,&#92;&quot;kind&#92;&quot;:&#92;&quot;csv_merged&#92;&quot;,&#92;&quot;files&#92;&quot;:&#92;&quot;Dormant_MPs_SingleCells.csv&#92;&quot;,&#92;&quot;size_mb&#92;&quot;:2209.33}]&quot;' data-total-rows='1' data-total-columns='4' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;input&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;kind&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;files&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;size_mb&quot;,[&quot;number&quot;,&quot;float64&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Hstk",
+      "code_hash": "fc991ced693486da20143b124987bdb9",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"3-convert-with-cytotable\">3 \u2014 Convert with CytoTable</h2>\n<span class=\"paragraph\"><strong>What:</strong> each input becomes one Parquet file with one row per cell. For SQLite and\n<code>Per_*</code> tables, CytoTable reads Image, Cells, Cytoplasm and Nuclei in chunks and joins\nthem. A cell is kept when its cytoplasm object has a parent cell, a parent nucleus\nand an image (the same rule as the readers NB04 uses). A merged CSV is converted\nas it is.</span>\n<span class=\"paragraph\"><strong>Reason:</strong> Parquet is typed and columnar, so NB01 can read only the few hundred\ncolumns QC needs instead of the whole table, and it does so in seconds. CytoTable\ndoes the chunked reading and the join for CellProfiler's table layout.</span>\n<span class=\"paragraph\"><strong>Choices made here:</strong></span>\n<ul>\n<li>CytoTable's built-in join keeps only <code>Image_FileName_*</code> from the image table.\n  Data QC also needs <code>Image_ImageQuality_*</code> (blur, saturation), <code>Image_PathName_*</code> and\n  <code>Image_Count_*</code>, so the join here keeps <strong>every</strong> image column.</li>\n<li>Column names are <strong>not</strong> changed (<code>ImageNumber</code>, <code>Image_Metadata_Plate</code>, ...);\n  NB01 applies the usual Plate/Well/Site renaming when it loads.</li>\n<li>CytoTable runs in threads, not subprocesses (works the same on Windows).</li>\n</ul>\n<span class=\"paragraph\"><strong>Assumptions:</strong> object numbers in the Cells, Nuclei and Cytoplasm tables are\nunique within an image, and every database or table set holds whole plates (cells of\none plate are not split across inputs).</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "nWHF",
+      "code_hash": "683d914581fcca5d06fc1ad3e2b03197",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-ui-element object-id='nWHF-0' random-id='3a9f9827-649a-bc08-afb7-241b912ea2a8'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;input&#92;&quot;:&#92;&quot;Dormant_MPs_SingleCells&#92;&quot;,&#92;&quot;kind&#92;&quot;:&#92;&quot;csv_merged&#92;&quot;,&#92;&quot;source_files&#92;&quot;:&#92;&quot;Dormant_MPs_SingleCells.csv&#92;&quot;,&#92;&quot;source_cells&#92;&quot;:72154,&#92;&quot;parquet_file&#92;&quot;:&#92;&quot;Dormant_MPs_SingleCells.parquet&#92;&quot;,&#92;&quot;cells&#92;&quot;:72154,&#92;&quot;status&#92;&quot;:&#92;&quot;converted&#92;&quot;,&#92;&quot;stale&#92;&quot;:false}]&quot;' data-total-rows='1' data-total-columns='8' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;input&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;kind&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;source_files&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;source_cells&quot;,[&quot;integer&quot;,&quot;int64&quot;]],[&quot;parquet_file&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;cells&quot;,[&quot;integer&quot;,&quot;int64&quot;]],[&quot;status&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;stale&quot;,[&quot;boolean&quot;,&quot;bool&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element>"
+          }
+        }
+      ],
+      "console": [
+        {
+          "type": "stream",
+          "name": "stderr",
+          "text": "Skipping column name prepend operations because no compartments or metadata were provided.\nSkipping column name prepend operations because no compartments or metadata were provided.\nSkipping column name prepend operations because no compartments or metadata were provided.\nSkipping column name prepend operations because no compartments or metadata were provided.\nSkipping column name prepend operations because no compartments or metadata were provided.\nSkipping column name prepend operations because no compartments or metadata were provided.\nSkipping column name prepend operations because no compartments or metadata were provided.\n",
+          "mimetype": "text/plain"
+        }
+      ]
+    },
+    {
+      "id": "iLit",
+      "code_hash": "5f78124554ece1149da9ee2a8695ed25",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-callout-output data-html='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003e&#92;u003cstrong&#92;u003e72,154 cells&#92;u003c/strong&#92;u003e in 1 Parquet file(s). No objects were dropped.&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-kind='&quot;success&quot;'></marimo-callout-output>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "ZHCJ",
+      "code_hash": "31889b8e68893de0fa54f2074cbe5464",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"4-check-the-parquet-files-what-nb01-will-find\">4 \u2014 Check the Parquet files: what NB01 will find</h2>\n<span class=\"paragraph\"><strong>Question:</strong> can the data-QC notebook use these files as they are?</span>\n<span class=\"paragraph\">Each check reads only the Parquet footers or a handful of columns.</span>\n<table>\n<thead>\n<tr>\n<th>Result</th>\n<th>Meaning</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><strong>PASS</strong></td>\n<td>NB01 finds what it needs</td>\n</tr>\n<tr>\n<td><strong>WARN</strong></td>\n<td>NB01 runs with less: it falls back or skips a figure</td>\n</tr>\n<tr>\n<td><strong>FAIL</strong></td>\n<td>NB01 will stop; fix the input or the CellProfiler pipeline first</td>\n</tr>\n</tbody>\n</table>\n<span class=\"paragraph\">The most important check is that <strong>every cell is unique</strong> by plate, well, site, image\nand object number. If two plates share a <code>Metadata_Plate</code> value (for example two\nfolders that are both called <code>\u2026_Plate_1</code>), their cells collide, and QC flags would be\nattached to the wrong cells.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "ROlb",
+      "code_hash": "b667ca36b9b609673cd7eb6a1ad48849",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<marimo-ui-element object-id='ROlb-0' random-id='8d658bd0-ffef-5106-da59-39bdd2e9a56c'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;file&#92;&quot;:&#92;&quot;Dormant_MPs_SingleCells.parquet&#92;&quot;,&#92;&quot;cells&#92;&quot;:72154,&#92;&quot;columns&#92;&quot;:1830,&#92;&quot;size_mb&#92;&quot;:1102.49}]&quot;' data-total-rows='1' data-total-columns='4' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;file&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;cells&quot;,[&quot;integer&quot;,&quot;int64&quot;]],[&quot;columns&quot;,[&quot;integer&quot;,&quot;int64&quot;]],[&quot;size_mb&quot;,[&quot;number&quot;,&quot;float64&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='false' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "qnkX",
+      "code_hash": "09cd9a92c169512101c236f45dee9227",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><marimo-callout-output data-html='&quot;&#92;u003cspan class=&#92;&quot;markdown prose dark:prose-invert contents&#92;&quot;&#92;u003e&#92;u003cspan class=&#92;&quot;paragraph&#92;&quot;&#92;u003e&#92;u003cstrong&#92;u003eNB01 will stop.&#92;u003c/strong&#92;u003e Fix the FAIL rows first.&#92;u003c/span&#92;u003e&#92;u003c/span&#92;u003e&quot;' data-kind='&quot;danger&quot;'></marimo-callout-output><marimo-ui-element object-id='qnkX-0' random-id='b49ded91-ba84-2de2-cddd-c2015e75b77f'><marimo-table data-initial-value='[]' data-label='null' data-data='&quot;[{&#92;&quot;check&#92;&quot;:&#92;&quot;Plate, well and site columns&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;PASS&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;found&#92;&quot;},{&#92;&quot;check&#92;&quot;:&#92;&quot;Cells are unique&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;FAIL&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;cannot check; missing [&#x27;ImageNumber&#x27;]&#92;&quot;},{&#92;&quot;check&#92;&quot;:&#92;&quot;Nuclear stain for DNA features&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;PASS&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;AOGFP (Hoechst, DNA, DAPI or AOGFP, in that order)&#92;&quot;},{&#92;&quot;check&#92;&quot;:&#92;&quot;coSMicQC features&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;PASS&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;4 features found&#92;&quot;},{&#92;&quot;check&#92;&quot;:&#92;&quot;Image file names for cell crops&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;WARN&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;no crops without file names&#92;&quot;},{&#92;&quot;check&#92;&quot;:&#92;&quot;CellProfiler image quality&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;WARN&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;no Image_ImageQuality_* columns: NB01 measures blur and saturation from the raw images (slower) or skips image QC. Add MeasureImageQuality to the CellProfiler pipeline.&#92;&quot;},{&#92;&quot;check&#92;&quot;:&#92;&quot;Nucleus position for cell crops&#92;&quot;,&#92;&quot;result&#92;&quot;:&#92;&quot;PASS&#92;&quot;,&#92;&quot;detail&#92;&quot;:&#92;&quot;Nuclei_Location_Center_X&#92;&quot;}]&quot;' data-total-rows='7' data-total-columns='3' data-max-columns='50' data-banner-text='&quot;&quot;' data-pagination='false' data-page-size='10' data-field-types='[[&quot;check&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;result&quot;,[&quot;string&quot;,&quot;str&quot;]],[&quot;detail&quot;,[&quot;string&quot;,&quot;str&quot;]]]' data-show-filters='true' data-show-download='true' data-show-search='true' data-show-column-summaries='false' data-show-data-types='true' data-show-page-size-selector='true' data-show-column-explorer='true' data-show-chart-builder='true' data-row-headers='[]' data-hidden-columns='[]' data-has-stable-row-id='false' data-lazy='false' data-preload='false'></marimo-table></marimo-ui-element></div>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "TqIu",
+      "code_hash": "3e1022f6d168f06c09f3ee59f058353a",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"5-write-the-summary-tables\">5 \u2014 Write the summary tables</h2>\n<table>\n<thead>\n<tr>\n<th>File</th>\n<th>Rows</th>\n<th>Used by</th>\n</tr>\n</thead>\n<tbody>\n<tr>\n<td><code>conversion_summary.csv</code></td>\n<td>one per input: raw files, raw cells, Parquet file, cells, columns</td>\n<td>review</td>\n</tr>\n<tr>\n<td><code>input_checks.csv</code></td>\n<td>the checks of section 4</td>\n<td>review</td>\n</tr>\n</tbody>\n</table>\n<span class=\"paragraph\">The summary holds only values that do not change between runs (no timings), so a rerun\nwithout overwrite does not fail on a harmless difference. Existing files are protected: a file\nwhose content differs is not replaced unless <strong>Overwrite existing outputs</strong> is on.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Vxnm",
+      "code_hash": "236088af21ae81d148912e65830f831d",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><pre class='text-xs'>    created  /Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/analysis/dormant-mps/results/parquet_conversion/conversion_summary.csv\n</pre><pre class='text-xs'>    created  /Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/analysis/dormant-mps/results/parquet_conversion/input_checks.csv\n</pre></div>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "DnEU",
+      "code_hash": "a2e24e6b20d7f094718b58a8bb61089c",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"6-provenance\">6 \u2014 Provenance</h2>\n<span class=\"paragraph\">Schema-v2 provenance record: raw inputs and outputs with SHA-256, settings, software\nversions and git state. Read-only git commands only.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "ulZA",
+      "code_hash": "de37e5f2d980f774c8627c39d880401b",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><pre class='text-xs'>\u2713 Provenance written: /Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/analysis/dormant-mps/results/parquet_conversion/provenance_nb00_latest.json\n</pre></div>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "ecfG",
+      "code_hash": "c36d7ee763d91a763792b3d06ff2c202",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"7-final-integrity-checks\">7 \u2014 Final integrity checks</h2></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "Pvdt",
+      "code_hash": "9dd4dcf18f2d5fe5a20d438afc8d5561",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/html": "<div style='display: flex;flex: 1;flex-direction: column;justify-content: flex-start;align-items: normal;flex-wrap: nowrap;gap: 0.5rem'><pre class='text-xs'>  PASS  every Parquet file exists\n</pre><pre class='text-xs'>  PASS  every Parquet file has cells\n</pre><pre class='text-xs'>  PASS  Parquet cells \u2264 raw cells (the join only drops objects)\n</pre><pre class='text-xs'>  PASS  no scratch folders left behind\n</pre><pre class='text-xs'>  PASS  all outputs are in the experiment&#x27;s analysis folder\n</pre></div>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "ZBYS",
+      "code_hash": "56894b5de7aec593a56d86217b1f4793",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"notebook-complete\">Notebook complete</h2>\n<span class=\"paragraph\">This notebook converted the raw CellProfiler output to Parquet, without changing any\nraw file or any column name:</span>\n<ol>\n<li><strong>Found</strong> the input (SQLite, <code>Per_*</code> CSV tables or one merged CSV).</li>\n<li><strong>Converted</strong> it with CytoTable to one row per cell, keeping all image columns.</li>\n<li><strong>Checked</strong> that NB01 will find its columns and that every cell is unique.</li>\n</ol>\n<span class=\"paragraph\">It did not do QC, normalise values or remove cells. Next: open NB01 (data QC).</span>\n<h3 id=\"key-outputs\">Key outputs</h3>\n<ul>\n<li><code>analysis/&lt;EXPERIMENT_ID&gt;/outputs/parquet/*.parquet</code> \u2014 one row per cell; read by NB01</li>\n<li><code>results/parquet_conversion/conversion_summary.csv</code> \u2014 raw vs. converted cells per input</li>\n<li><code>results/parquet_conversion/input_checks.csv</code> \u2014 what NB01 will find (PASS / WARN / FAIL)</li>\n<li><code>results/parquet_conversion/provenance_nb00_latest.json</code> \u2014 run provenance</li>\n</ul></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "aLJB",
+      "code_hash": "b6bd21cbed843e40512b74c13b22c2e8",
+      "outputs": [
+        {
+          "type": "data",
+          "data": {
+            "text/markdown": "<span class=\"markdown prose dark:prose-invert contents\"><h2 id=\"save-the-analysis-record\">Save the analysis record</h2>\n<span class=\"paragraph\">Save the notebook's <strong>current session</strong> without rerunning cells:</span>\n<ul>\n<li><strong>HTML</strong> preserves code and the complete rich-output record;</li>\n<li><strong>PDF</strong> provides a clean reading copy without code inputs.</li>\n</ul>\n<span class=\"paragraph\">Chromium can write both files directly to the experiment's <code>reports/</code>\nfolder after authorization. Safari shows separate HTML and PDF download\nbuttons because it cannot write directly to a selected folder.</span></span>"
+          }
+        }
+      ],
+      "console": []
+    },
+    {
+      "id": "nHfw",
+      "code_hash": "2b06a419d1679a3b6a399d587475b779",
+      "outputs": [
+        {
+          "type": "error",
+          "ename": "exception",
+          "evalue": "No module named 'anywidget'",
+          "traceback": null
+        }
+      ],
+      "console": [
+        {
+          "type": "stream",
+          "name": "stderr",
+          "text": "<span class=\"codehilite\"><div class=\"highlight\"><pre><span></span><span class=\"gt\">Traceback (most recent call last):</span>\n  File <span class=\"nb\">\"/var/folders/xp/968ml1d97hvbqy3xjmw0zsgc0000gp/T/marimo_28815/__marimo__cell_nHfw_.py\"</span>, line <span class=\"m\">1</span>, in <span class=\"n\">&lt;module&gt;</span>\n<span class=\"w\">    </span><span class=\"kn\">from</span><span class=\"w\"> </span><span class=\"nn\">hca_pipeline.report_export</span><span class=\"w\"> </span><span class=\"kn\">import</span> <span class=\"n\">SessionReportSaver</span>\n  File <span class=\"nb\">\"/Users/erikserrano/Projects/cookiecutter-lcp/{{cookiecutter.repo_name}}/workspace/hca_pipeline/report_export.py\"</span>, line <span class=\"m\">51</span>, in <span class=\"n\">&lt;module&gt;</span>\n<span class=\"w\">    </span><span class=\"kn\">import</span><span class=\"w\"> </span><span class=\"nn\">anywidget</span>\n<span class=\"gr\">ModuleNotFoundError</span>: <span class=\"n\">No module named 'anywidget'</span>\n</pre></div>\n</span>",
+          "mimetype": "application/vnd.marimo+traceback"
+        }
+      ]
+    }
+  ]
+}

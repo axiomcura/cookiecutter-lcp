@@ -19,24 +19,24 @@ def _():
 @app.cell
 def _(mo):
     mo.md(r"""
-    # 00 — Data Quality Control (images and single cells)
+    # 01 — Data Quality Control (images and single cells)
 
-    **Pipeline step:** 0 of 6 (runs before NB01)
-    **Position in pipeline:** CellProfiler output → **NB00 (data QC)** → NB01 (samples retrieval)
-    **Purpose:** find bad images and badly segmented cells in the raw
-    CellProfiler output, show them, and write exclusion lists that NB01 applies.
+    **Pipeline step:** 1 (runs after NB00, before NB04)
+    **Position in pipeline:** NB00 (convert to Parquet) → **NB01 (data QC)** → NB04 (samples retrieval)
+    **Purpose:** find bad images and badly segmented cells in the CellProfiler
+    output (as Parquet from NB00), show them, and write exclusion lists that NB04 applies.
 
     > This notebook **flags only**. It never edits or deletes CellProfiler
-    > output. NB01 adds two labels to every cell, **`Metadata_image_qc`** and
+    > output. NB04 adds two labels to every cell, **`Metadata_image_qc`** and
     > **`Metadata_profile_qc`** (`pass` / `fail`), and removes the `fail` cells.
 
-    **Input:** CellProfiler SQLite database(s) or `Per_*` CSV tables in
-    `workspace/backend/<EXPERIMENT_ID>/`; raw images (optional, for display and
+    **Input:** the Parquet files written by NB00 in
+    `analysis/<EXPERIMENT_ID>/outputs/parquet/`; raw images (optional, for display and
     for the pixel-based fallback)
     **Outputs** (in `analysis/<EXPERIMENT_ID>/results/data_qc/`):
     `site_qc.csv`, `excluded_sites.csv`, `cell_qc.parquet`,
     `excluded_cells.parquet`, `dna_content_peaks.csv`,
-    `dna_content_per_well.csv`, `provenance_nb00_latest.json`; figures in
+    `dna_content_per_well.csv`, `provenance_nb01_latest.json`; figures in
     `figures/data_qc/` (`<name>.pdf` and `.png` for papers, `<name>_explained.png` with headline)
 
     ## Three checks
@@ -47,7 +47,7 @@ def _(mo):
     | **Profile QC** ([coSMicQC](https://github.com/cytomining/coSMicQC)) | cell | Is the segmentation of this cell likely wrong? | a cell trips an active coSMicQC condition |
     | **DNA content** | plate, well, cell | Does the nuclear stain show G1 and G2/M populations? | reported, not used to exclude cells |
 
-    Image QC and profile QC are independent: a cell can fail either one. NB01
+    Image QC and profile QC are independent: a cell can fail either one. NB04
     keeps a cell only if its site passes image QC **and** the cell passes
     profile QC (the same rule as the Panc1-hPSC pilot QC).
 
@@ -59,7 +59,7 @@ def _(mo):
     ## Execution logic
 
     1. Choose the experiment and (optionally) adjust thresholds.
-    2. Load the CellProfiler tables and keep only the columns QC needs.
+    2. Read the Parquet files from NB00 (only the columns QC needs).
     3. Image QC: blur and saturation per site and channel; montages of flagged
        and passing sites.
     4. Profile QC: coSMicQC conditions per plate; crops of flagged and passing cells.
@@ -151,10 +151,8 @@ def _(Path, mo):
         shared_limits,
     )
     from hca_pipeline.image_qc import read_image, robust_rescale_image, scan_images
+    from hca_pipeline.cytotable_convert import parquet_dir, read_qc_columns
     from hca_pipeline.io import (
-        discover_single_cell_inputs,
-        read_cellprofiler_csvs,
-        read_cellprofiler_sqlite,
         write_parquet_protected,
         write_summary_table_protected,
     )
@@ -178,7 +176,6 @@ def _(Path, mo):
         cellprofiler_quality_channels,
         crop_centered,
         dedupe_meta,
-        discover_single_cell_inputs,
         dna_content_groups,
         ensure_core_metadata,
         fig_cell_crops,
@@ -192,12 +189,12 @@ def _(Path, mo):
         index_images,
         label_cell_outliers,
         profile_qc_conditions,
+        parquet_dir,
         pf,
         profile_qc_status,
         read_barcode_platemap,
-        read_cellprofiler_csvs,
-        read_cellprofiler_sqlite,
         read_image,
+        read_qc_columns,
         readable,
         resolve_dna_channel,
         resolve_image_path,
@@ -216,9 +213,9 @@ def _(mo):
     mo.md(r"""
     ## 1 — Experiment configuration
 
-    Pick the experiment folder. Settings saved by NB01's configuration wizard
+    Pick the experiment folder. Settings saved by NB04's configuration wizard
     (`experiment_config.json`: control vocabulary, image folder) are used when
-    they exist; on a first run, before NB01, defaults are used.
+    they exist; on a first run, before NB04, defaults are used.
 
     The thresholds below are the published starting points, **not validated
     cut-offs for your assay**. Run this notebook interactively once per
@@ -316,6 +313,7 @@ def _(
     mo,
     n_examples_input,
     overwrite_input,
+    parquet_dir,
     pixel_size_input,
     saturation_input,
 ):
@@ -332,9 +330,9 @@ def _(
     IMAGE_ROOT = (REPO_ROOT / image_root_input.value.strip()) if image_root_input.value.strip() else None
 
     WORKSPACE_DIR = REPO_ROOT / "workspace"
-    DB_ROOT = WORKSPACE_DIR / "backend" / EXPERIMENT_ID
     METADATA_DIR = WORKSPACE_DIR / "metadata" / EXPERIMENT_ID
     ANALYSIS_DIR = WORKSPACE_DIR / "analysis" / EXPERIMENT_ID
+    PARQUET_DIR = parquet_dir(ANALYSIS_DIR)  # written by NB00
     RESULTS_DIR = ANALYSIS_DIR / "results" / "data_qc"
     FIGS_DIR = ANALYSIS_DIR / "figures" / "data_qc"
     for _directory in (RESULTS_DIR, FIGS_DIR):
@@ -348,7 +346,7 @@ def _(
             | Setting | Value |
             |---|---|
             | Experiment | `{EXPERIMENT_ID}` |
-            | CellProfiler input | `{DB_ROOT}` |
+            | Parquet input (from NB00) | `{PARQUET_DIR}` |
             | Pixel size | {f'{PIXEL_SIZE_UM} µm' if PIXEL_SIZE_UM else 'unknown (no scale bars)'} |
             | Raw image folder | `{IMAGE_ROOT or 'not set (CellProfiler paths only)'}` |
             | Blur limit | robust z < {BLUR_Z_LIMIT} |
@@ -365,7 +363,6 @@ def _(
         ACTIVE_CONDITIONS,
         BLUR_Z_LIMIT,
         CONFIG,
-        DB_ROOT,
         EXPERIMENT_ID,
         FIGS_DIR,
         FIG_FORMATS,
@@ -373,6 +370,7 @@ def _(
         METADATA_DIR,
         N_EXAMPLES,
         OVERWRITE,
+        PARQUET_DIR,
         PIXEL_SIZE_UM,
         RANDOM_STATE,
         RESULTS_DIR,
@@ -383,55 +381,41 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    ## 2 — Load the CellProfiler output
+    ## 2 — Load the Parquet files from NB00
 
-    The same readers as NB01 merge the Image, Cells, Cytoplasm and Nuclei
-    tables. Only the columns QC needs are kept (metadata, object numbers,
-    `ImageQuality`, file names, nuclear/cell DNA intensity, solidity and
-    nucleus position), so memory use stays small.
+    Reads `analysis/<EXPERIMENT_ID>/outputs/parquet/*.parquet`, written by NB00. Parquet
+    stores each column separately, so only the columns QC needs are read (metadata, object
+    numbers, `ImageQuality`, file names, nuclear and cell DNA intensity, solidity and
+    nucleus position) out of the thousands in the table. Memory use stays small and
+    loading takes seconds. If a plate was converted without NB00's checks, run NB00
+    first: its section 4 lists what is missing.
     """)
     return
 
 
 @app.cell
 def _(
-    DB_ROOT,
+    PARQUET_DIR,
     dedupe_meta,
-    discover_single_cell_inputs,
     ensure_core_metadata,
     mo,
-    pd,
     print,
-    read_cellprofiler_csvs,
-    read_cellprofiler_sqlite,
+    read_qc_columns,
 ):
-    _inputs = discover_single_cell_inputs(DB_ROOT)
-    INPUT_PATHS = _inputs["sqlite"] or _inputs["csv"]
+    INPUT_PATHS = sorted(PARQUET_DIR.glob("*.parquet"))
     mo.stop(
         not INPUT_PATHS,
         mo.callout(
             mo.md(
-                f"**NB00 stopped:** no CellProfiler SQLite database or `Per_*` CSV tables in `{DB_ROOT}`. "
-                "Copy the CellProfiler output there and rerun this cell."
+                f"**NB01 stopped:** no Parquet files in `{PARQUET_DIR}`. "
+                "Run NB00 (`00_convert_to_parquet.py`) for this experiment first."
             ),
             kind="warn",
         ),
     )
-    if _inputs["sqlite"]:
-        _raw = pd.concat([read_cellprofiler_sqlite(p, progress=print) for p in INPUT_PATHS], ignore_index=True)
-    else:
-        _raw = read_cellprofiler_csvs(INPUT_PATHS, progress=print)
-    _raw = dedupe_meta(ensure_core_metadata(_raw))
-
-    _missing = [c for c in ("Metadata_Plate", "Metadata_Well", "Metadata_Site") if c not in _raw.columns]
-    if _missing:
-        raise ValueError(
-            f"Required metadata missing: {_missing}. Image QC works per site, so the CellProfiler "
-            "export must include Plate, Well and Site metadata."
-        )
-
     _keep_prefixes = (
         "Metadata_",
+        "Image_Metadata_",  # CellProfiler's own Plate/Well/Site; renamed to Metadata_* below
         "Image_ImageQuality_",
         "Image_FileName_",
         "Image_PathName_",
@@ -442,6 +426,9 @@ def _(
     )
     _keep_exact = {
         "ImageNumber",
+        "Plate",  # plain names that ensure_core_metadata maps to Metadata_*
+        "Well",
+        "Site",
         "Cells_Number_Object_Number",
         "Nuclei_Number_Object_Number",
         "Nuclei_AreaShape_Solidity",
@@ -451,13 +438,19 @@ def _(
         "Nuclei_AreaShape_Center_X",
         "Nuclei_AreaShape_Center_Y",
     }
-    qc_cells = _raw[[c for c in _raw.columns if c.startswith(_keep_prefixes) or c in _keep_exact]].copy()
-    del _raw
+    qc_cells = dedupe_meta(ensure_core_metadata(read_qc_columns(INPUT_PATHS, _keep_prefixes, _keep_exact)))
+
+    _missing = [c for c in ("Metadata_Plate", "Metadata_Well", "Metadata_Site") if c not in qc_cells.columns]
+    if _missing:
+        raise ValueError(
+            f"Required metadata missing: {_missing}. Image QC works per site, so the CellProfiler "
+            "export must include Plate, Well and Site metadata."
+        )
     qc_cells["Metadata_Plate"] = qc_cells["Metadata_Plate"].astype("string").str.strip()
     # One text form for site IDs, so site keys match across CSV/SQLite/image names.
     qc_cells["Metadata_Site"] = qc_cells["Metadata_Site"].astype(str).str.replace(r"\.0$", "", regex=True)
 
-    print(f"✓ Loaded {len(qc_cells):,} cells × {qc_cells.shape[1]} QC columns from {len(INPUT_PATHS)} file(s)")
+    print(f"✓ Loaded {len(qc_cells):,} cells × {qc_cells.shape[1]} QC columns from {len(INPUT_PATHS)} Parquet file(s)")
     print(f"  Plates: {qc_cells['Metadata_Plate'].nunique()}  ·  "
           f"Sites: {len(qc_cells[['Metadata_Plate', 'Metadata_Well', 'Metadata_Site']].drop_duplicates()):,}")
     return INPUT_PATHS, qc_cells
@@ -473,7 +466,7 @@ def _(
     qc_cells,
     read_barcode_platemap,
 ):
-    # Optional: treatment and control labels from the platemap. NB00 works
+    # Optional: treatment and control labels from the platemap. NB01 works
     # without them; they add the negative-control G1 anchor (section 5) and
     # the treatment-vs-control comparison (section 6).
     _barcode_csv = METADATA_DIR / "barcode_platemap.csv"
@@ -627,7 +620,7 @@ def _(
 @app.cell
 def _(mo):
     mo.md(r"""
-    **What to notice:** sites beyond a dashed line are the ones NB01 removes. Most sites
+    **What to notice:** sites beyond a dashed line are the ones NB04 removes. Most sites
     should sit in one main group, with the flagged sites clearly apart from it.
 
     **Do not conclude:** that every flagged site is bad. The blur score is relative to the
@@ -1068,7 +1061,7 @@ def _(mo):
 
     **Positive control:** synthetic G1/G2 mixtures in `tests/test_data_qc.py`
     recover a ratio of 2.0 ± 0.15. **Negative control:** a single-peak
-    distribution gives no G2 peak. These labels are **descriptive**: NB00 does
+    distribution gives no G2 peak. These labels are **descriptive**: NB01 does
     not exclude cells on DNA content, because sub-G1 and >G2 cells can be
     treatment biology.
     """)
@@ -1252,9 +1245,9 @@ def _(mo):
     | File | Rows | Used by |
     |---|---|---|
     | `site_qc.csv` | every site: metrics, flags, reason | review |
-    | `excluded_sites.csv` | sites failing image QC (Plate/Well/Site + reason) | NB01 |
+    | `excluded_sites.csv` | sites failing image QC (Plate/Well/Site + reason) | NB04 |
     | `cell_qc.parquet` | every cell: keys, coSMicQC flags, profile/image status, DNA group | review, later notebooks |
-    | `excluded_cells.parquet` | cells failing profile QC (keys + reason) | NB01 |
+    | `excluded_cells.parquet` | cells failing profile QC (keys + reason) | NB04 |
     | `dna_content_peaks.csv`, `dna_content_per_well.csv` | per plate / per well | review |
 
     Existing files are protected: a file whose content differs is not
@@ -1306,7 +1299,7 @@ def _(
     for _name, _state in _status.items():
         print(f"  {_state:>9}  {OUTPUT_PATHS[_name]}")
     if "Cells_Number_Object_Number" not in CELL_KEYS:
-        print("⚠️  No Cells_Number_Object_Number column: NB01 cannot match single cells, only sites.")
+        print("⚠️  No Cells_Number_Object_Number column: NB04 cannot match single cells, only sites.")
 
     _image_fail = cell_qc["Metadata_image_qc"].eq("fail")
     _profile_fail = cell_qc["Metadata_profile_qc"].eq("fail")
@@ -1315,7 +1308,7 @@ def _(
             "cells": [len(cell_qc)],
             "image QC fail": [int(_image_fail.sum())],
             "profile QC fail": [int(_profile_fail.sum())],
-            "either (removed by NB01)": [int((_image_fail | _profile_fail).sum())],
+            "either (removed by NB04)": [int((_image_fail | _profile_fail).sum())],
             "kept %": [round(100 * (1 - (_image_fail | _profile_fail).mean()), 1)],
         }
     )
@@ -1392,13 +1385,13 @@ def _(
                 "cosmicqc_version": getattr(cosmicqc, "__version__", "unknown"),
             },
         },
-        notebook="00_data_qc.py",
+        notebook="01_data_qc.py",
         experiment_id=EXPERIMENT_ID,
         repo_root=REPO_ROOT,
         dependencies=INPUT_PATHS,
         outputs=list(OUTPUT_PATHS.values()),
     )
-    provenance_path = RESULTS_DIR / "provenance_nb00_latest.json"
+    provenance_path = RESULTS_DIR / "provenance_nb01_latest.json"
     if provenance_path.exists() and not OVERWRITE:
         print(f"  preserved  {provenance_path} (enable overwrite to replace)")
     else:
@@ -1437,7 +1430,7 @@ def _(
     for _name, _ok in _checks:
         print(f"  {'PASS' if _ok else 'FAIL'}  {_name}")
     if not all(ok for _, ok in _checks):
-        raise AssertionError("NB00 integrity checks failed — see the list above.")
+        raise AssertionError("NB01 integrity checks failed — see the list above.")
     return
 
 
@@ -1453,16 +1446,16 @@ def _(mo):
     3. **DNA content** per cell, plate and well, and whether the nuclear stain
        shows a G2/M peak at ~2× G1.
 
-    NB01 removes the sites in `excluded_sites.csv` and the cells in
+    NB04 removes the sites in `excluded_sites.csv` and the cells in
     `excluded_cells.parquet`. DNA-content groups are descriptive only.
 
     ### Key outputs
-    - `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet` — read by NB01
+    - `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet` — read by NB04
     - `results/data_qc/site_qc.csv`, `cell_qc.parquet` — full flag tables
     - `results/data_qc/dna_content_peaks.csv`, `dna_content_per_well.csv` — cell-cycle check
     - `figures/data_qc/*.pdf`, `*.png` — distributions, plate maps, montages, crops, DNA histograms
       (paper versions); `*_explained.png` — the same with headline and how-to-read line
-    - `results/data_qc/provenance_nb00_latest.json` — run provenance
+    - `results/data_qc/provenance_nb01_latest.json` — run provenance
     """)
     return
 
@@ -1489,7 +1482,7 @@ def _(EXPERIMENT_ID, mo):
     from hca_pipeline.report_export import SessionReportSaver
 
     _report_saver = SessionReportSaver(
-        basename=f"{EXPERIMENT_ID}_00_data_qc",
+        basename=f"{EXPERIMENT_ID}_01_data_qc",
         suggested_directory=f"workspace/analysis/{EXPERIMENT_ID}/reports",
     )
     mo.ui.anywidget(_report_saver)

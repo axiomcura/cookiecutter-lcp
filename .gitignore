@@ -23,3 +23,7 @@ Thumbs.db
 
 #ignore graphify files
 graphify-out/ 
+
+# ignore large files
+*.csv
+*.parquet

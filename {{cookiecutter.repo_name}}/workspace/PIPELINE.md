@@ -33,7 +33,8 @@ of those notebooks as a substitute for actually reviewing them.
 
 | Step | Notebook | Input | Output | What it does |
 |------|----------|-------|--------|-------------|
-| 0 of 6 | `00_data_qc.py` | CellProfiler SQLite / `Per_*` CSVs; optional raw images | `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet`, `site_qc.csv`, `cell_qc.parquet`, DNA-content tables, `figures/data_qc/*.pdf`, `*.png` | Flags only: image QC (blur, saturation per site and channel), single-cell QC with coSMicQC, DNA-content (G1/G2) check; montages and cell crops for review — see [Data QC (NB00)](#data-qc-nb00) |
+| 0 | `00_convert_to_parquet.py` | CellProfiler SQLite / `Per_*` CSVs / one merged CSV in `backend/{EXPERIMENT_ID}/` | `outputs/parquet/*.parquet` (one row per cell), `results/parquet_conversion/*.csv` | Convert with CytoTable; checks that data QC will find its columns and that cells are unique — see [Convert to Parquet](#convert-to-parquet-nb00) |
+| 1 | `01_data_qc.py` | `outputs/parquet/*.parquet` (from `00_convert_to_parquet.py`); optional raw images | `results/data_qc/excluded_sites.csv`, `excluded_cells.parquet`, `site_qc.csv`, `cell_qc.parquet`, DNA-content tables, `figures/data_qc/*.pdf`, `*.png` | Flags only: image QC (blur, saturation per site and channel), single-cell QC with coSMicQC, DNA-content (G1/G2) check; montages and cell crops for review — see [Data QC (NB00)](#data-qc-nb00) |
 | 1 of 6 | `01_samples_retrieval.py` | Legacy single-cell CSV (or SQLite, per experiment); optional NB00 `site_qc.csv` and `cell_qc.parquet` (and the image-quality extra's `excluded_sites.csv`) | `single_cell_profiles_qc.parquet` (+ `Metadata_image_qc`, `Metadata_profile_qc`) | Read/consolidate all discovered plates, label every cell pass/fail from NB00 (and the image-quality extra) and remove the failing cells (checkboxes), select the analysis plate scope, check required-reference coverage, structural sanity checks (SC-01→SC-05) |
 | 2 of 6 | `02_aggregate_normalize_featureselect.py` | `single_cell_profiles_qc.parquet` | `per_well_features_selected.parquet` | Filter to NB01's selected plate scope, annotate with platemap, aggregate to well-level, mad_robustize normalization, feature selection (SC-06→SC-10) |
 | 3 of 6 | `03_quality_metrics.py` | `per_well_features_selected.parquet` | `results/quality_metrics/*.csv`, `figures/quality_metrics/*.png` | Percent Replicating, mAP, batch assessment, dose-response, Go/No-Go decision (SC-18→SC-22) — runs **before** biological interpretation, so profiling/fingerprints/single-cell analysis only happen on data that already cleared the replicate-signal bar |
@@ -89,10 +90,40 @@ Go/No-Go decision based on:
 | PM (Percent Matching) | What fraction of profiles match same treatment? | 0–1 | > 0.50 | Caicedo et al. 2020 |
 | mAP (Mean Average Precision) | How well can we retrieve replicates from ranking? | 0–1 | > 0.50, FDR-significant | Kalinin et al. 2025 [doi:10.1038/s41467-025-60306-2] |
 
-## Data QC (NB00)
+## Convert to Parquet (NB00)
 
-`00_data_qc.py` runs on the raw CellProfiler output, before NB01. It
-**flags** problems and writes QC tables; NB01 labels every cell and removes the failures.
+`00_convert_to_parquet.py` converts the raw CellProfiler output in `backend/{EXPERIMENT_ID}/` to Parquet
+with [CytoTable](https://github.com/cytomining/CytoTable). It changes no raw file and no column name.
+Later notebooks read only the columns they need, which is fast even for thousands of features.
+
+| `backend/{EXPERIMENT_ID}/` holds | Output in `analysis/{EXPERIMENT_ID}/outputs/parquet/` |
+|---|---|
+| SQLite database(s), one per plate | one file per database, named after it |
+| `Per_Image.csv`, `Per_Cells.csv`, `Per_Cytoplasm.csv`, `Per_Nuclei.csv` | one file named after the experiment |
+| one merged single-cell CSV (needs a numeric `ImageNumber` column) | one file named after the CSV |
+
+Any other mix of CSV files is refused. A file that already exists is kept unless **Overwrite existing
+outputs** is on; the notebook warns when the raw file is newer.
+
+- **Join rule:** the same as `hca_pipeline.io`: a cell is kept when its cytoplasm object has a parent
+  cell, a parent nucleus and an image. The notebook reports how many objects the join dropped.
+- **Image columns:** all of them are kept (`Image_ImageQuality_*`, `Image_PathName_*`, ...).
+  CytoTable's built-in CellProfiler join drops all but `Image_FileName_*`, and data QC needs the rest.
+- **Checks (section 4):** plate, well and site present; **every cell unique** by plate, well, site, image
+  and object (two plates with one `Metadata_Plate` value collide here, and QC flags would land on the wrong
+  cells); DNA channel and coSMicQC features present; ImageQuality columns present (WARN: data QC falls
+  back to raw images). FAIL means data QC will stop.
+- **Tested:** `tests/test_cytotable_convert.py` checks that the Parquet equals what the pandas readers
+  give, for SQLite, `Per_*` CSVs and a merged CSV, including small chunks.
+- **Environment:** CytoTable 1.x needs DuckDB below 2 (`pixi.toml` pins `duckdb<2`).
+
+**Outputs:** `outputs/parquet/<name>.parquet`; `results/parquet_conversion/conversion_summary.csv`,
+`input_checks.csv`, `provenance_nb00_latest.json`.
+
+## Data QC (NB01)
+
+`01_data_qc.py` runs on the Parquet files from `00_convert_to_parquet.py` (not on the raw files). It
+**flags** problems and writes QC tables; the samples-retrieval notebook labels every cell and removes the failures.
 Nothing in `backend/` is changed.
 
 | Check | Unit | Features | Rule (defaults) | Source |
@@ -418,7 +449,9 @@ recur across different students' submissions in different amounts; run
 │   │   │   │   └── recovery_axis_analysis.py
 │   │   │   └── legacy_ipynb/          # superseded Jupyter versions, kept for reference
 │   │   ├── outputs/                   # NB01 output (single_cell_profiles_qc.parquet)
+│   │   │   └── parquet/               # NB00: raw CellProfiler output as Parquet (read by data QC)
 │   │   ├── results/
+│   │   │   ├── parquet_conversion/    # NB00 (conversion summary, input checks)
 │   │   │   ├── data_qc/               # NB00 (exclusion lists read by NB01)
 │   │   │   ├── image_quality/         # optional image-quality extra
 │   │   │   ├── cv_summary.csv         # NB02

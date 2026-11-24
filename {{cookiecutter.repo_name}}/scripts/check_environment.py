@@ -17,6 +17,8 @@ packages = [
     "pycytominer",
     "copairs",
     "cosmicqc",
+    "cytotable",
+    "duckdb",
     "marimo",
     "hdbscan",
     "harmonypy",
