@@ -16,6 +16,10 @@ cookiecutter_test/
 **/.ipynb_checkpoints/
 
 # IDE/OS
+.claude/
 .vscode/
 .idea/
 Thumbs.db
+
+#ignore graphify files
+graphify-out/ 
